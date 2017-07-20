@@ -1,0 +1,1696 @@
+diff --git a/libstdc++-v3/include/Makefile.am b/libstdc++-v3/include/Makefile.am
+index 3703bd1..c8c073c 100644
+--- a/libstdc++-v3/include/Makefile.am
++++ b/libstdc++-v3/include/Makefile.am
+@@ -190,6 +190,7 @@ bits_headers = \
+ 	${bits_srcdir}/streambuf_iterator.h \
+ 	${bits_srcdir}/streambuf.tcc \
+ 	${bits_srcdir}/stringfwd.h \
++	${bits_srcdir}/string_conv.h \
+ 	${bits_srcdir}/string_view.tcc \
+ 	${bits_srcdir}/uniform_int_dist.h \
+ 	${bits_srcdir}/unique_ptr.h \
+diff --git a/libstdc++-v3/include/bits/string_conv.h b/libstdc++-v3/include/bits/string_conv.h
+new file mode 100644
+index 0000000..330c0a8
+--- /dev/null
++++ b/libstdc++-v3/include/bits/string_conv.h
+@@ -0,0 +1,420 @@
++// Implementation of std::to_chars and std::from_chars -*- C++ -*-
++
++// Copyright (C) 2017 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// Under Section 7 of GPL version 3, you are granted additional
++// permissions described in the GCC Runtime Library Exception, version
++// 3.1, as published by the Free Software Foundation.
++
++// You should have received a copy of the GNU General Public License and
++// a copy of the GCC Runtime Library Exception along with this program;
++// see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
++// <http://www.gnu.org/licenses/>.
++
++/** @file include/bits/string_conv.h
++ *  This is an internal header file, included by other library headers.
++ *  Do not attempt to use it directly. @headername{utility}
++ */
++
++#ifndef _GLIBCXX_STRING_CONV_H
++#define _GLIBCXX_STRING_CONV_H 1
++
++#pragma GCC system_header
++
++#if __cplusplus < 201402L
++# include <bits/c++14_warning.h>
++#else
++
++#include <system_error>
++#include <limits>
++#include <cctype>
++
++namespace std _GLIBCXX_VISIBILITY(default)
++{
++_GLIBCXX_BEGIN_NAMESPACE_VERSION
++
++  struct to_chars_result {
++    char* ptr;
++    error_code ec;
++  };
++
++  struct from_chars_result {
++    const char* ptr;
++    error_code ec;
++  };
++
++_GLIBCXX_END_NAMESPACE_VERSION
++namespace __detail{
++_GLIBCXX_BEGIN_NAMESPACE_VERSION
++  template<typename _Tp, typename... _Types>
++    using __is_one_of = __or_<is_same<_Tp, _Types>...>;
++
++  template<typename _Tp>
++    using __is_to_chars_type = __and_<is_integral<_Tp>,
++	  __not_<__is_one_of<_Tp, bool, char16_t, char32_t
++#if _GLIBCXX_USE_WCHAR_T
++	  , wchar_t
++#endif
++	    >>>;
++
++  template<typename _Tp>
++    using __to_chars_result_type
++      = enable_if_t<__is_to_chars_type<_Tp>::value, to_chars_result>;
++
++  template<typename _Tp>
++    using __unsigned_least_t
++      = conditional_t<(sizeof(_Tp) <= sizeof(int)), unsigned int,
++	conditional_t<(sizeof(_Tp) <= sizeof(long)), unsigned long,
++	conditional_t<(sizeof(_Tp) <= sizeof(long long)), unsigned long long,
++#if _GLIBCXX_USE_INT128
++	conditional_t<(sizeof(_Tp) <= sizeof(__int128)), unsigned __int128,
++#endif
++	void>>>>;
++
++  template<typename _Tp>
++    constexpr unsigned
++    __to_chars_len(_Tp __value, int __base = 10)
++    {
++      static_assert(is_integral<_Tp>::value, "implementation bug");
++      static_assert(is_unsigned<_Tp>::value, "implementation bug");
++
++      unsigned __n = 1;
++      const int __b2 = __base  * __base;
++      const int __b3 = __b2 * __base;
++      const int __b4 = __b3 * __base;
++      for (;;)
++	{
++	  if (__value < __base) return __n;
++	  if (__value < __b2) return __n + 1;
++	  if (__value < __b3) return __n + 2;
++	  if (__value < __b4) return __n + 3;
++	  __value /= (unsigned)__b4;
++	  __n += 4;
++	}
++    }
++
++  template<typename _Tp>
++    to_chars_result
++    __to_chars(char* __first, char* __last, _Tp __val, int __base)
++    {
++      static_assert(is_integral<_Tp>::value, "implementation bug");
++      static_assert(is_unsigned<_Tp>::value, "implementation bug");
++
++      constexpr char __digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
++
++      to_chars_result __res;
++
++      const unsigned __len = __to_chars_len(__val, __base);
++
++      if (__builtin_expect((__last - __first) < __len, 0))
++	{
++	  __res.ptr = __last;
++	  __res.ec = std::make_error_code(errc::value_too_large);
++	  return __res;
++	}
++
++      unsigned __pos = __len - 1;
++
++      if (__base == 10)
++	{
++	  constexpr char __digits[201] =
++	    "0001020304050607080910111213141516171819"
++	    "2021222324252627282930313233343536373839"
++	    "4041424344454647484950515253545556575859"
++	    "6061626364656667686970717273747576777879"
++	    "8081828384858687888990919293949596979899";
++	  while (__val >= 100)
++	    {
++	      auto const __num = (__val % 100) * 2;
++	      __val /= 100;
++	      __first[__pos] = __digits[__num + 1];
++	      __first[__pos - 1] = __digits[__num];
++	      __pos -= 2;
++	    }
++	  if (__val >= 10)
++	    {
++	      auto const __num = __val * 2;
++	      __first[__pos] = __digits[__num + 1];
++	      __first[__pos - 1] = __digits[__num];
++	    }
++	  else
++	    __first[__pos] = '0' + __val;
++	}
++      else if (__base == 8)
++	{
++	  constexpr char __digits[129] =
++	    "00010203040506071011121314151617"
++	    "20212223242526273031323334353637"
++	    "40414243444546475051525354555657"
++	    "60616263646566677071727374757677";
++	  while (__val >= 64)
++	    {
++	      auto const __num = (__val % 64) * 2;
++	      __val /= 64;
++	      __first[__pos] = __digits[__num + 1];
++	      __first[__pos - 1] = __digits[__num];
++	      __pos -= 2;
++	    }
++	  if (__val >= 8)
++	    {
++	      auto const __num = __val * 2;
++	      __first[__pos] = __digits[__num + 1];
++	      __first[__pos - 1] = __digits[__num];
++	    }
++	  else
++	    __first[__pos] = '0' + __val;
++	}
++      else if (__base == 2)
++	{
++	  while (__pos)
++	    {
++	      __first[__pos--] = '0' + (__val & 1);
++	      __val >>= 1;
++	    }
++	  *__first = '0' + (__val & 1);
++	}
++      else
++	{
++	  while (__val >= __base)
++	    {
++	      auto const __quo = __val / __base;
++	      auto const __rem = __val % __base;
++	      __first[__pos--] = __digits[__rem];
++	      __val = __quo;
++	    }
++	  *__first = __digits[__val];
++	}
++      __res.ptr = __first + __len;
++      return __res;
++    }
++_GLIBCXX_END_NAMESPACE_VERSION
++}
++_GLIBCXX_BEGIN_NAMESPACE_VERSION
++
++  template<typename _Tp>
++    __detail::__to_chars_result_type<_Tp>
++    to_chars(char* __first, char* __last, _Tp __value, int __base = 10)
++    {
++      __glibcxx_assert(2 <= __base && __base <= 36);
++
++      using _Up = __detail::__unsigned_least_t<_Tp>;
++      _Up __unsigned_val = __value;
++
++      if _GLIBCXX17_CONSTEXPR (std::is_signed<_Tp>::value)
++	if (__value < 0)
++	  {
++	    if (__builtin_expect(__first != __last, 1))
++	      *__first++ = '-';
++	    __unsigned_val = _Up(~__value) + _Up(1);
++	  }
++
++      return __detail::__to_chars(__first, __last, __unsigned_val, __base);
++    }
++
++_GLIBCXX_END_NAMESPACE_VERSION
++namespace __detail {
++_GLIBCXX_BEGIN_NAMESPACE_VERSION
++
++  template<typename _Tp>
++    bool
++    __raise_and_add(_Tp& __val, int __base, unsigned char __c)
++    {
++      if (__builtin_mul_overflow(__val, __base, &__val)
++	  || __builtin_add_overflow(__val, __c, &__val))
++	return false;
++      return true;
++    }
++
++  template<typename _Tp>
++    bool
++    __from_chars_binary(const char*& __first, const char* __last, _Tp& __val)
++    {
++      static_assert(is_integral<_Tp>::value, "implementation bug");
++      static_assert(is_unsigned<_Tp>::value, "implementation bug");
++
++      const ptrdiff_t __len = __last - __first;
++      int __i = 0;
++      while (__i < __len)
++	{
++	  if (__first[__i] == '0')
++	      __val <<= 1;
++	  else if (__first[__i] == '1')
++	      (__val <<= 1) |= 1;
++	  else
++	    break;
++	  __i++;
++	}
++      __first += __i;
++      return __i <= (sizeof(_Tp) * __CHAR_BIT__);
++    }
++
++  template<typename _Tp>
++    bool
++    __from_chars_digit(const char*& __first, const char* __last, _Tp& __val,
++		       int __base)
++    {
++      static_assert(is_integral<_Tp>::value, "implementation bug");
++      static_assert(is_unsigned<_Tp>::value, "implementation bug");
++
++      auto __matches = [__base](char __c) {
++	  return '0' <= __c && __c <= ('0' + (__base - 1));
++      };
++
++      while (__first != __last)
++	{
++	  const char __c = *__first;
++	  if (__matches(__c))
++	  {
++	    if (!__raise_and_add(__val, __base, __c - '0'))
++	      {
++		while (++__first != __last && __matches(*__first))
++		  ;
++		return false;
++	      }
++	    __first++;
++	  }
++	  else
++	    return true;
++	}
++      return true;
++    }
++
++  constexpr bool __consecutive_chars(const char* __s, int __n)
++  {
++    for (int __i = 1; __i < __n; ++__i)
++      if (__s[__i] != (__s[__i-1] + 1))
++	return false;
++    return true;
++  }
++
++  template<typename _Tp>
++    bool
++    __from_chars_alnum(const char*& __first, const char* __last, _Tp& __val,
++		       int __base)
++    {
++      const int __b = __base - 10;
++      bool __valid = true;
++      while (__first != __last)
++	{
++	  unsigned char __c = *__first;
++	  if (std::isdigit(__c))
++	    __c -= '0';
++	  else
++	    {
++	      constexpr char __abc[] = "abcdefghijklmnopqrstuvwxyz";
++	      unsigned char __lc = std::tolower(__c);
++	      constexpr bool __consecutive = __consecutive_chars(__abc, 26);
++	      if _GLIBCXX17_CONSTEXPR (__consecutive)
++		{
++		  // Characters 'a'..'z' are consecutive
++		  if (std::isalpha(__c) && (__lc - 'a') < __b)
++		    __c = __lc - 'a' + 10;
++		  else
++		    break;
++		}
++	      else
++		{
++		  if (auto __p = __builtin_memchr(__abc, __lc, __b))
++		    __c = static_cast<const char*>(__p) - __abc;
++		  else
++		    break;
++		}
++	    }
++
++	  if (__builtin_expect(__valid, 1))
++	    __valid = __raise_and_add(__val, __base, __c);
++	  __first++;
++	}
++      return __valid;
++    }
++
++  template<typename _Tp>
++    using __from_chars_result_type
++      = enable_if_t<__is_to_chars_type<_Tp>::value, from_chars_result>;
++
++_GLIBCXX_END_NAMESPACE_VERSION
++}
++_GLIBCXX_BEGIN_NAMESPACE_VERSION
++
++  template<typename _Tp>
++    __detail::__from_chars_result_type<_Tp>
++    from_chars(const char* __first, const char* __last, _Tp& __value,
++	       int __base = 10)
++    {
++      __glibcxx_assert(2 <= __base && __base <= 36);
++
++      from_chars_result __res{__first, {}};
++
++      int __sign = 1;
++      if _GLIBCXX17_CONSTEXPR (std::is_signed<_Tp>::value)
++	if (__first != __last && *__first == '-')
++	  {
++	    __sign = -1;
++	    ++__first;
++	  }
++
++      using _Up = __detail::__unsigned_least_t<_Tp>;
++      _Up __val = 0;
++
++      const auto __start = __first;
++      bool __valid;
++      if (__base == 2)
++	__valid = __detail::__from_chars_binary(__first, __last, __val);
++      else if (__base <= 10)
++	__valid = __detail::__from_chars_digit(__first, __last, __val, __base);
++      else
++	__valid = __detail::__from_chars_alnum(__first, __last, __val, __base);
++
++      if (__builtin_expect(__first == __start, 0))
++	__res.ec = std::make_error_code(errc::invalid_argument);
++      else
++	{
++	  __res.ptr = __first;
++	  if (!__valid)
++	    __res.ec = std::make_error_code(errc::result_out_of_range);
++	  else
++	    {
++	      if _GLIBCXX17_CONSTEXPR (std::is_signed<_Tp>::value)
++		{
++		  _Tp __tmp;
++		  if (__builtin_mul_overflow(__val, __sign, &__tmp))
++		    __res.ec = make_error_code(errc::result_out_of_range);
++		  else
++		    __value = __tmp;
++		}
++	      else
++		{
++		  if _GLIBCXX17_CONSTEXPR
++		    (numeric_limits<_Up>::max() > numeric_limits<_Tp>::max())
++		    {
++		      if (__val > numeric_limits<_Tp>::max())
++			__res.ec = make_error_code(errc::result_out_of_range);
++		      else
++			__value = __val;
++		    }
++		  else
++		    __value = __val;
++		}
++	    }
++	}
++
++      return __res;
++    }
++
++_GLIBCXX_END_NAMESPACE_VERSION
++} // namespace std
++
++#endif // C++11
++
++#endif // _GLIBCXX_STRING_CONV_H
+diff --git a/libstdc++-v3/include/std/utility b/libstdc++-v3/include/std/utility
+index 188fcc2..acbf1a0 100644
+--- a/libstdc++-v3/include/std/utility
++++ b/libstdc++-v3/include/std/utility
+@@ -77,6 +77,7 @@
+ 
+ #if __cplusplus > 201402L
+ #include <exception>
++#include <bits/string_conv.h>
+ #endif
+ 
+ namespace std _GLIBCXX_VISIBILITY(default)
+diff --git a/libstdc++-v3/testsuite/20_util/from_chars/1.cc b/libstdc++-v3/testsuite/20_util/from_chars/1.cc
+new file mode 100644
+index 0000000..ed94d23
+--- /dev/null
++++ b/libstdc++-v3/testsuite/20_util/from_chars/1.cc
+@@ -0,0 +1,80 @@
++// Copyright (C) 2017 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// { dg-options "-std=gnu++17" }
++// { dg-do run { target c++1z } }
++
++#include <utility>
++#include <string_view>
++
++template<typename I>
++bool
++check_from_chars(I expected, std::string_view s, int base = 0, char term = '\0')
++{
++  I val;
++  std::from_chars_result r = base == 0
++    ? std::from_chars(s.begin(), s.end(), val)
++    : std::from_chars(s.begin(), s.end(), val, base);
++  return !r.ec && (r.ptr == s.end() || *r.ptr == term) && val == expected;
++}
++
++#include <climits>
++#include <testsuite_hooks.h>
++
++void
++test01()
++{
++  // Using base 10
++  VERIFY( check_from_chars(123, "123") );
++  VERIFY( check_from_chars(-123, "-123") );
++  VERIFY( check_from_chars(123, "123a", 10, 'a') );
++  VERIFY( check_from_chars(123, "0000000000000000000000000000123") );
++  VERIFY( check_from_chars(123, "0000000000000000000000000000123a", 10, 'a') );
++}
++
++void
++test02()
++{
++  // "0x" parsed as "0" not as hex prefix:
++  VERIFY( check_from_chars(0, "0x1", 10, 'x') );
++  VERIFY( check_from_chars(0, "0X1", 10, 'X') );
++  VERIFY( check_from_chars(0, "0x1", 16, 'x') );
++  VERIFY( check_from_chars(0, "0X1", 16, 'X') );
++
++  VERIFY( check_from_chars(1155, "xx", 34) );
++  VERIFY( check_from_chars(1155, "XX", 34) );
++  VERIFY( check_from_chars(1155, "Xx", 34) );
++  VERIFY( check_from_chars(1224, "yy", 35) );
++  VERIFY( check_from_chars(1224, "YY", 35) );
++  VERIFY( check_from_chars(1224, "yY", 35) );
++  VERIFY( check_from_chars(1295, "zz", 36) );
++  VERIFY( check_from_chars(1295, "ZZ", 36) );
++  VERIFY( check_from_chars(1295, "Zz", 36) );
++
++  // Parsing stops at first invalid digit for the given base:
++  VERIFY( check_from_chars(1, "01234", 2, '2') );
++  VERIFY( check_from_chars(27, "1234", 4, '4') );
++  VERIFY( check_from_chars(1155, "xxy", 34, 'y') );
++  VERIFY( check_from_chars(1224, "yyz", 35, 'z') );
++}
++
++int
++main()
++{
++  test01();
++  test02();
++}
+diff --git a/libstdc++-v3/testsuite/20_util/from_chars/1_neg.cc b/libstdc++-v3/testsuite/20_util/from_chars/1_neg.cc
+new file mode 100644
+index 0000000..6eb5572
+--- /dev/null
++++ b/libstdc++-v3/testsuite/20_util/from_chars/1_neg.cc
+@@ -0,0 +1,38 @@
++// Copyright (C) 2017 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// { dg-options "-std=gnu++17" }
++// { dg-do compile { target c++1z } }
++
++#include <utility>
++
++void
++test01(const char* first, const char* last)
++{
++#if _GLIBCXX_USE_WCHAR_T
++  wchar_t wc;
++  std::from_chars(first, last, wc); // { dg-error "no matching" }
++  std::from_chars(first, last, wc, 10); // { dg-error "no matching" }
++#endif
++
++  char16_t c16;
++  std::from_chars(first, last, c16); // { dg-error "no matching" }
++  std::from_chars(first, last, c16, 10); // { dg-error "no matching" }
++  char32_t c32;
++  std::from_chars(first, last, c32); // { dg-error "no matching" }
++  std::from_chars(first, last, c32, 10); // { dg-error "no matching" }
++}
+diff --git a/libstdc++-v3/testsuite/20_util/from_chars/2.cc b/libstdc++-v3/testsuite/20_util/from_chars/2.cc
+new file mode 100644
+index 0000000..3cb54ad
+--- /dev/null
++++ b/libstdc++-v3/testsuite/20_util/from_chars/2.cc
+@@ -0,0 +1,205 @@
++// Copyright (C) 2017 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// { dg-options "-std=gnu++17" }
++// { dg-do run { target c++1z } }
++
++#include <utility>
++#include <string_view>
++#include <testsuite_hooks.h>
++
++// Test std::from_chars error handling.
++
++void
++test01()
++{
++  std::from_chars_result r;
++  int i = 999;
++  std::string_view s;
++
++  s = "";
++  r = std::from_chars(s.begin(), s.end(), i);
++  VERIFY( r.ec == std::errc::invalid_argument );
++  VERIFY( r.ptr == s.begin() );
++  VERIFY( i == 999 );
++
++  s = "*";
++  r = std::from_chars(s.begin(), s.end(), i);
++  VERIFY( r.ec == std::errc::invalid_argument );
++  VERIFY( r.ptr == s.begin() );
++  VERIFY( i == 999 );
++
++  s = "-";
++  r = std::from_chars(s.begin(), s.end(), i);
++  VERIFY( r.ec == std::errc::invalid_argument );
++  VERIFY( r.ptr == s.begin() );
++  VERIFY( i == 999 );
++
++  s = "-*";
++  r = std::from_chars(s.begin(), s.end(), i);
++  VERIFY( r.ec == std::errc::invalid_argument );
++  VERIFY( r.ptr == s.begin() );
++  VERIFY( i == 999 );
++
++  unsigned u = 888;
++  s = "-1";
++  r = std::from_chars(s.begin(), s.end(), u);
++  VERIFY( r.ec == std::errc::invalid_argument );
++  VERIFY( r.ptr == s.begin() );
++  s = "-a";
++  r = std::from_chars(s.begin(), s.end(), u);
++  VERIFY( r.ec == std::errc::invalid_argument );
++  VERIFY( r.ptr == s.begin() );
++  s = "-";
++  r = std::from_chars(s.begin(), s.end(), u);
++  VERIFY( r.ec == std::errc::invalid_argument );
++  VERIFY( r.ptr == s.begin() );
++  VERIFY( u == 888 );
++
++  for (int base = 2; base <= 36; ++base)
++  {
++    const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz*";
++    const char buf[2] = { '-', digits[base] };
++    r = std::from_chars(buf, buf + 1, i, base);
++    VERIFY( r.ec == std::errc::invalid_argument );
++    VERIFY( r.ptr == buf );
++    VERIFY( i == 999 );
++    r = std::from_chars(buf + 1, buf + 2, i, base);
++    VERIFY( r.ec == std::errc::invalid_argument );
++    VERIFY( r.ptr == buf + 1 );
++    VERIFY( i == 999 );
++    r = std::from_chars(buf, buf + 2, i, base);
++    VERIFY( r.ec == std::errc::invalid_argument );
++    VERIFY( r.ptr == buf );
++    VERIFY( i == 999 );
++  }
++}
++
++void
++test02()
++{
++  std::from_chars_result r;
++  std::string_view s;
++
++  signed char c = -5;
++  s = "-10000001";
++  r = std::from_chars(s.begin(), s.end(), c, 2);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.end() );
++  s = "-10000001*";
++  r = std::from_chars(s.begin(), s.end(), c, 2);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.begin() + 9 );
++  s = "-10000001000*";
++  r = std::from_chars(s.begin(), s.end(), c, 2);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.begin() + 12 );
++  s = "-129";
++  r = std::from_chars(s.begin(), s.end(), c, 10);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.end() );
++  s = "-129*";
++  r = std::from_chars(s.begin(), s.end(), c, 10);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.begin() + 4 );
++  s = "-100";
++  r = std::from_chars(s.begin(), s.end(), c, 16);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.end() );
++  s = "-100*";
++  r = std::from_chars(s.begin(), s.end(), c, 16);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.begin() + 4 );
++  s = "-81";
++  r = std::from_chars(s.begin(), s.end(), c, 16);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.end() );
++  s = "-81*";
++  r = std::from_chars(s.begin(), s.end(), c, 16);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.begin() + 3 );
++  s = "128";
++  r = std::from_chars(s.begin(), s.end(), c, 10);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.end() );
++  s = "128*";
++  r = std::from_chars(s.begin(), s.end(), c, 10);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.begin() + 3 );
++  s = "80";
++  r = std::from_chars(s.begin(), s.end(), c, 16);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.end() );
++  s = "80*";
++  r = std::from_chars(s.begin(), s.end(), c, 16);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.begin() + 2 );
++  VERIFY( c == -5 );
++
++  unsigned char uc = 9;
++  s = "100000000";
++  r = std::from_chars(s.begin(), s.end(), uc, 2);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.end() );
++  s = "100000000*";
++  r = std::from_chars(s.begin(), s.end(), uc, 2);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.begin() + 9 );
++  s = "100000000000*";
++  r = std::from_chars(s.begin(), s.end(), uc, 2);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.begin() + 12 );
++  s = "256";
++  r = std::from_chars(s.begin(), s.end(), uc, 10);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.end() );
++  s = "256**";
++  r = std::from_chars(s.begin(), s.end(), uc, 10);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.begin() + 3 );
++  s = "256000**";
++  r = std::from_chars(s.begin(), s.end(), uc, 10);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.begin() + 6 );
++  s = "100";
++  r = std::from_chars(s.begin(), s.end(), uc, 16);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.end() );
++  s = "100**";
++  r = std::from_chars(s.begin(), s.end(), uc, 16);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.begin() + 3 );
++  s = "100000**";
++  r = std::from_chars(s.begin(), s.end(), uc, 16);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.begin() + 6 );
++  VERIFY( uc == 9 );
++
++  unsigned long long ull = 123;
++  s = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz****";
++  r = std::from_chars(s.begin(), s.end(), ull, 36);
++  VERIFY( r.ec == std::errc::result_out_of_range );
++  VERIFY( r.ptr == s.begin() + 42 );
++  VERIFY( ull == 123 );
++}
++
++int
++main()
++{
++  test01();
++  test02();
++}
+diff --git a/libstdc++-v3/testsuite/20_util/from_chars/requirements.cc b/libstdc++-v3/testsuite/20_util/from_chars/requirements.cc
+new file mode 100644
+index 0000000..378882e
+--- /dev/null
++++ b/libstdc++-v3/testsuite/20_util/from_chars/requirements.cc
+@@ -0,0 +1,61 @@
++// Copyright (C) 2017 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// { dg-options "-std=gnu++17" }
++// { dg-do compile { target c++1z } }
++
++#include <utility>
++
++namespace std
++{
++  struct from_chars_result;
++
++  const char* from_chars_result::*pm2 = &from_chars_result::ptr;
++  error_code from_chars_result::*pm1 = &from_chars_result::ec;
++
++  from_chars_result (*f1)(const char*, const char*, char&, int)
++    = &from_chars;
++  from_chars_result (*f2)(const char*, const char*, signed char&, int)
++    = &from_chars;
++  from_chars_result (*f3)(const char*, const char*, unsigned char&, int)
++    = &from_chars;
++  from_chars_result (*f4)(const char*, const char*, signed short&, int)
++    = &from_chars;
++  from_chars_result (*f5)(const char*, const char*, unsigned short&, int)
++    = &from_chars;
++  from_chars_result (*f6)(const char*, const char*, signed int&, int)
++    = &from_chars;
++  from_chars_result (*f7)(const char*, const char*, unsigned int&, int)
++    = &from_chars;
++  from_chars_result (*f8)(const char*, const char*, signed long&, int)
++    = &from_chars;
++  from_chars_result (*f9)(const char*, const char*, unsigned long&, int)
++    = &from_chars;
++  from_chars_result (*f10)(const char*, const char*, signed long long&, int)
++    = &from_chars;
++  from_chars_result (*f11)(const char*, const char*, unsigned long long&, int)
++    = &from_chars;
++}
++
++void bind()
++{
++  const char buf[1] = "";
++  int i;
++  auto [p, e] = std::from_chars(buf, buf + 1, i, 10);
++  const char** pa = std::addressof(p);
++  std::error_code* ea = std::addressof(e);
++}
+diff --git a/libstdc++-v3/testsuite/20_util/to_chars/1.cc b/libstdc++-v3/testsuite/20_util/to_chars/1.cc
+new file mode 100644
+index 0000000..c5a4165
+--- /dev/null
++++ b/libstdc++-v3/testsuite/20_util/to_chars/1.cc
+@@ -0,0 +1,661 @@
++// Copyright (C) 2017 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// { dg-options "-std=gnu++17" }
++// { dg-do run { target c++1z } }
++
++#include <utility>
++#include <string_view>
++
++template<typename I>
++bool
++check_to_chars(I val, std::string_view expected, int base = 0)
++{
++  // Space for minus sign, 64 binary digits, final '*', and null terminator:
++  char buf[67] = "******************************************************************";
++  std::to_chars_result r = base == 0
++    ? std::to_chars(buf, buf+sizeof(buf), val)
++    : std::to_chars(buf, buf+sizeof(buf), val, base);
++  return !r.ec && *r.ptr == '*' && std::string_view(buf, r.ptr - buf) == expected;
++}
++
++#include <string>
++#include <climits>
++#include <testsuite_hooks.h>
++
++// Using default base 10
++void
++test01()
++{
++  VERIFY( check_to_chars<char>(0, "0") );
++  VERIFY( check_to_chars<signed char>(0, "0") );
++  VERIFY( check_to_chars<unsigned char>(0, "0") );
++  VERIFY( check_to_chars<signed short>(0, "0") );
++  VERIFY( check_to_chars<unsigned short>(0, "0") );
++  VERIFY( check_to_chars<signed int>(0, "0") );
++  VERIFY( check_to_chars<unsigned int>(0, "0") );
++  VERIFY( check_to_chars<signed long>(0, "0") );
++  VERIFY( check_to_chars<unsigned long>(0, "0") );
++  VERIFY( check_to_chars<signed long long>(0, "0") );
++  VERIFY( check_to_chars<unsigned long long>(0, "0") );
++
++  VERIFY( check_to_chars<char>(1, "1") );
++  VERIFY( check_to_chars<signed char>(1, "1") );
++  VERIFY( check_to_chars<unsigned char>(1, "1") );
++  VERIFY( check_to_chars<signed short>(1, "1") );
++  VERIFY( check_to_chars<unsigned short>(1, "1") );
++  VERIFY( check_to_chars<signed int>(1, "1") );
++  VERIFY( check_to_chars<unsigned int>(1, "1") );
++  VERIFY( check_to_chars<signed long>(1, "1") );
++  VERIFY( check_to_chars<unsigned long>(1, "1") );
++  VERIFY( check_to_chars<signed long long>(1, "1") );
++  VERIFY( check_to_chars<unsigned long long>(1, "1") );
++
++  VERIFY( check_to_chars<char>(123, "123") );
++  VERIFY( check_to_chars<signed char>(123, "123") );
++  VERIFY( check_to_chars<unsigned char>(123, "123") );
++  VERIFY( check_to_chars<signed short>(123, "123") );
++  VERIFY( check_to_chars<unsigned short>(123, "123") );
++  VERIFY( check_to_chars<signed int>(123, "123") );
++  VERIFY( check_to_chars<unsigned int>(123, "123") );
++  VERIFY( check_to_chars<signed long>(123, "123") );
++  VERIFY( check_to_chars<unsigned long>(123, "123") );
++  VERIFY( check_to_chars<signed long long>(123, "123") );
++  VERIFY( check_to_chars<unsigned long long>(123, "123") );
++
++  if constexpr (std::is_signed_v<char>)
++    VERIFY( check_to_chars<char>(-79, "-79") );
++  VERIFY( check_to_chars<signed char>(-79, "-79") );
++  VERIFY( check_to_chars<signed short>(-79, "-79") );
++  VERIFY( check_to_chars<signed int>(-79, "-79") );
++  VERIFY( check_to_chars<signed long>(-79, "-79") );
++  VERIFY( check_to_chars<signed long long>(-79, "-79") );
++
++  using std::to_string;
++
++  VERIFY( check_to_chars<char>(CHAR_MAX, to_string(CHAR_MAX)) );
++  VERIFY( check_to_chars<signed char>(SCHAR_MAX, to_string(SCHAR_MAX)) );
++  VERIFY( check_to_chars<unsigned char>(UCHAR_MAX, to_string(UCHAR_MAX)) );
++  VERIFY( check_to_chars<signed short>(SHRT_MAX, to_string(SHRT_MAX)) );
++  VERIFY( check_to_chars<unsigned short>(USHRT_MAX, to_string(USHRT_MAX)) );
++  VERIFY( check_to_chars<signed int>(INT_MAX, to_string(INT_MAX)) );
++  VERIFY( check_to_chars<unsigned int>(UINT_MAX, to_string(UINT_MAX)) );
++  VERIFY( check_to_chars<signed long>(LONG_MAX, to_string(LONG_MAX)) );
++  VERIFY( check_to_chars<unsigned long>(ULONG_MAX, to_string(ULONG_MAX)) );
++  VERIFY( check_to_chars<signed long long>(LLONG_MAX, to_string(LLONG_MAX)) );
++  VERIFY( check_to_chars<unsigned long long>(ULLONG_MAX, to_string(ULLONG_MAX)) );
++
++  VERIFY( check_to_chars<char>(CHAR_MIN, to_string(CHAR_MIN)) );
++  VERIFY( check_to_chars<signed char>(SCHAR_MIN, to_string(SCHAR_MIN)) );
++  VERIFY( check_to_chars<signed short>(SHRT_MIN, to_string(SHRT_MIN)) );
++  VERIFY( check_to_chars<signed int>(INT_MIN, to_string(INT_MIN)) );
++  VERIFY( check_to_chars<signed long>(LONG_MIN, to_string(LONG_MIN)) );
++  VERIFY( check_to_chars<signed long long>(LLONG_MIN, to_string(LLONG_MIN)) );
++
++  VERIFY( check_to_chars<char>(CHAR_MAX/2, to_string(CHAR_MAX/2)) );
++  VERIFY( check_to_chars<signed char>(SCHAR_MAX/2, to_string(SCHAR_MAX/2)) );
++  VERIFY( check_to_chars<unsigned char>(UCHAR_MAX/2, to_string(UCHAR_MAX/2)) );
++  VERIFY( check_to_chars<signed short>(SHRT_MAX/2, to_string(SHRT_MAX/2)) );
++  VERIFY( check_to_chars<unsigned short>(USHRT_MAX/2, to_string(USHRT_MAX/2)) );
++  VERIFY( check_to_chars<signed int>(INT_MAX/2, to_string(INT_MAX/2)) );
++  VERIFY( check_to_chars<unsigned int>(UINT_MAX/2, to_string(UINT_MAX/2)) );
++  VERIFY( check_to_chars<signed long>(LONG_MAX/2, to_string(LONG_MAX/2)) );
++  VERIFY( check_to_chars<unsigned long>(ULONG_MAX/2, to_string(ULONG_MAX/2)) );
++  VERIFY( check_to_chars<signed long long>(LLONG_MAX/2, to_string(LLONG_MAX/2)) );
++  VERIFY( check_to_chars<unsigned long long>(ULLONG_MAX/2, to_string(ULLONG_MAX/2)) );
++}
++
++// Using explicit base 10
++void
++test02()
++{
++  VERIFY( check_to_chars<char>(0, "0", 10) );
++  VERIFY( check_to_chars<signed char>(0, "0", 10) );
++  VERIFY( check_to_chars<unsigned char>(0, "0", 10) );
++  VERIFY( check_to_chars<signed short>(0, "0", 10) );
++  VERIFY( check_to_chars<unsigned short>(0, "0", 10) );
++  VERIFY( check_to_chars<signed int>(0, "0", 10) );
++  VERIFY( check_to_chars<unsigned int>(0, "0", 10) );
++  VERIFY( check_to_chars<signed long>(0, "0", 10) );
++  VERIFY( check_to_chars<unsigned long>(0, "0", 10) );
++  VERIFY( check_to_chars<signed long long>(0, "0", 10) );
++  VERIFY( check_to_chars<unsigned long long>(0, "0", 10) );
++
++  VERIFY( check_to_chars<char>(1, "1", 10) );
++  VERIFY( check_to_chars<signed char>(1, "1", 10) );
++  VERIFY( check_to_chars<unsigned char>(1, "1", 10) );
++  VERIFY( check_to_chars<signed short>(1, "1", 10) );
++  VERIFY( check_to_chars<unsigned short>(1, "1", 10) );
++  VERIFY( check_to_chars<signed int>(1, "1", 10) );
++  VERIFY( check_to_chars<unsigned int>(1, "1", 10) );
++  VERIFY( check_to_chars<signed long>(1, "1", 10) );
++  VERIFY( check_to_chars<unsigned long>(1, "1", 10) );
++  VERIFY( check_to_chars<signed long long>(1, "1", 10) );
++  VERIFY( check_to_chars<unsigned long long>(1, "1", 10) );
++
++  VERIFY( check_to_chars<char>(123, "123", 10) );
++  VERIFY( check_to_chars<signed char>(123, "123", 10) );
++  VERIFY( check_to_chars<unsigned char>(123, "123", 10) );
++  VERIFY( check_to_chars<signed short>(123, "123", 10) );
++  VERIFY( check_to_chars<unsigned short>(123, "123", 10) );
++  VERIFY( check_to_chars<signed int>(123, "123", 10) );
++  VERIFY( check_to_chars<unsigned int>(123, "123", 10) );
++  VERIFY( check_to_chars<signed long>(123, "123", 10) );
++  VERIFY( check_to_chars<unsigned long>(123, "123", 10) );
++  VERIFY( check_to_chars<signed long long>(123, "123", 10) );
++  VERIFY( check_to_chars<unsigned long long>(123, "123", 10) );
++
++  if constexpr (std::is_signed_v<char>)
++    VERIFY( check_to_chars<char>(-79, "-79", 10) );
++  VERIFY( check_to_chars<signed char>(-79, "-79", 10) );
++  VERIFY( check_to_chars<signed short>(-79, "-79", 10) );
++  VERIFY( check_to_chars<signed int>(-79, "-79", 10) );
++  VERIFY( check_to_chars<signed long>(-79, "-79", 10) );
++  VERIFY( check_to_chars<signed long long>(-79, "-79", 10) );
++
++  using std::to_string;
++
++  VERIFY( check_to_chars<char>(CHAR_MAX, to_string(CHAR_MAX), 10) );
++  VERIFY( check_to_chars<signed char>(SCHAR_MAX, to_string(SCHAR_MAX), 10) );
++  VERIFY( check_to_chars<unsigned char>(UCHAR_MAX, to_string(UCHAR_MAX), 10) );
++  VERIFY( check_to_chars<signed short>(SHRT_MAX, to_string(SHRT_MAX), 10) );
++  VERIFY( check_to_chars<unsigned short>(USHRT_MAX, to_string(USHRT_MAX), 10) );
++  VERIFY( check_to_chars<signed int>(INT_MAX, to_string(INT_MAX), 10) );
++  VERIFY( check_to_chars<unsigned int>(UINT_MAX, to_string(UINT_MAX), 10) );
++  VERIFY( check_to_chars<signed long>(LONG_MAX, to_string(LONG_MAX), 10) );
++  VERIFY( check_to_chars<unsigned long>(ULONG_MAX, to_string(ULONG_MAX), 10) );
++  VERIFY( check_to_chars<signed long long>(LLONG_MAX, to_string(LLONG_MAX), 10) );
++  VERIFY( check_to_chars<unsigned long long>(ULLONG_MAX, to_string(ULLONG_MAX), 10) );
++
++  VERIFY( check_to_chars<char>(CHAR_MIN, to_string(CHAR_MIN), 10) );
++  VERIFY( check_to_chars<signed char>(SCHAR_MIN, to_string(SCHAR_MIN), 10) );
++  VERIFY( check_to_chars<signed short>(SHRT_MIN, to_string(SHRT_MIN), 10) );
++  VERIFY( check_to_chars<signed int>(INT_MIN, to_string(INT_MIN), 10) );
++  VERIFY( check_to_chars<signed long>(LONG_MIN, to_string(LONG_MIN), 10) );
++  VERIFY( check_to_chars<signed long long>(LLONG_MIN, to_string(LLONG_MIN), 10) );
++
++  VERIFY( check_to_chars<char>(CHAR_MAX/2, to_string(CHAR_MAX/2), 10) );
++  VERIFY( check_to_chars<signed char>(SCHAR_MAX/2, to_string(SCHAR_MAX/2), 10) );
++  VERIFY( check_to_chars<unsigned char>(UCHAR_MAX/2, to_string(UCHAR_MAX/2), 10) );
++  VERIFY( check_to_chars<signed short>(SHRT_MAX/2, to_string(SHRT_MAX/2), 10) );
++  VERIFY( check_to_chars<unsigned short>(USHRT_MAX/2, to_string(USHRT_MAX/2), 10) );
++  VERIFY( check_to_chars<signed int>(INT_MAX/2, to_string(INT_MAX/2), 10) );
++  VERIFY( check_to_chars<unsigned int>(UINT_MAX/2, to_string(UINT_MAX/2), 10) );
++  VERIFY( check_to_chars<signed long>(LONG_MAX/2, to_string(LONG_MAX/2), 10) );
++  VERIFY( check_to_chars<unsigned long>(ULONG_MAX/2, to_string(ULONG_MAX/2), 10) );
++  VERIFY( check_to_chars<signed long long>(LLONG_MAX/2, to_string(LLONG_MAX/2), 10) );
++  VERIFY( check_to_chars<unsigned long long>(ULLONG_MAX/2, to_string(ULLONG_MAX/2), 10) );
++}
++
++// Using all bases
++void
++test03()
++{
++  // -2017 in all bases from [2,36]
++  const char* str2017[37] = { nullptr, nullptr,
++    "-11111100001",
++    "-2202201",
++    "-133201",
++    "-31032",
++    "-13201",
++    "-5611",
++    "-3741",
++    "-2681",
++    "-2017",
++    "-1574",
++    "-1201",
++    "-bc2",
++    "-a41",
++    "-8e7",
++    "-7e1",
++    "-6gb",
++    "-641",
++    "-5b3",
++    "-50h",
++    "-4c1",
++    "-43f",
++    "-3ig",
++    "-3c1",
++    "-35h",
++    "-2pf",
++    "-2kj",
++    "-2g1",
++    "-2bg",
++    "-277",
++    "-232",
++    "-1v1",
++    "-1s4",
++    "-1pb",
++    "-1mm",
++    "-1k1"
++  };
++  // -12345 in all bases from [2,36]
++  const char* str12345[37] = { nullptr, nullptr,
++    "-11000000111001",
++    "-121221020",
++    "-3000321",
++    "-343340",
++    "-133053",
++    "-50664",
++    "-30071",
++    "-17836",
++    "-12345",
++    "-9303",
++    "-7189",
++    "-5808",
++    "-46db",
++    "-39d0",
++    "-3039",
++    "-28c3",
++    "-221f",
++    "-1f3e",
++    "-1ah5",
++    "-16ki",
++    "-13b3",
++    "-107h",
++    "-la9",
++    "-jik",
++    "-i6l",
++    "-gp6",
++    "-fkp",
++    "-ejk",
++    "-dlf",
++    "-cq7",
++    "-c1p",
++    "-bb3",
++    "-an3",
++    "-a2p",
++    "-9ix"
++  };
++  // -23456 in all bases from [2,36]
++  const char* str23456[37] = { nullptr, nullptr,
++    "-101101110100000",
++    "-1012011202",
++    "-11232200",
++    "-1222311",
++    "-300332",
++    "-125246",
++    "-55640",
++    "-35152",
++    "-23456",
++    "-16694",
++    "-116a8",
++    "-a8a4",
++    "-8796",
++    "-6e3b",
++    "-5ba0",
++    "-4d2d",
++    "-4072",
++    "-37ia",
++    "-2icg",
++    "-2b3k",
++    "-24a4",
++    "-1l7j",
++    "-1gh8",
++    "-1cd6",
++    "-18i4",
++    "-154k",
++    "-11pk",
++    "-rpo",
++    "-q1q",
++    "-ock",
++    "-mt0",
++    "-lhq",
++    "-k9u",
++    "-j56",
++    "-i3k"
++  };
++  // INT_MIN in all bases from [2,36]
++  const char* strINT_MIN[37] = { nullptr, nullptr,
++    "-10000000000000000000000000000000",
++    "-12112122212110202102",
++    "-2000000000000000",
++    "-13344223434043",
++    "-553032005532",
++    "-104134211162",
++    "-20000000000",
++    "-5478773672",
++    "-2147483648",
++    "-a02220282",
++    "-4bb2308a8",
++    "-282ba4aab",
++    "-1652ca932",
++    "-c87e66b8",
++    "-80000000",
++    "-53g7f549",
++    "-3928g3h2",
++    "-27c57h33",
++    "-1db1f928",
++    "-140h2d92",
++    "-ikf5bf2",
++    "-ebelf96",
++    "-b5gge58",
++    "-8jmdnkn",
++    "-6oj8ioo",
++    "-5ehnckb",
++    "-4clm98g",
++    "-3hk7988",
++    "-2sb6cs8",
++    "-2d09uc2",
++    "-2000000",
++    "-1lsqtl2",
++    "-1d8xqrq",
++    "-15v22un",
++    "-zik0zk"
++  };
++
++  for (int base = 2; base <= 36; ++base)
++  {
++    VERIFY( check_to_chars<char>(0, "0", base) );
++    VERIFY( check_to_chars<signed char>(0, "0", base) );
++    VERIFY( check_to_chars<unsigned char>(0, "0", base) );
++    VERIFY( check_to_chars<signed short>(0, "0", base) );
++    VERIFY( check_to_chars<unsigned short>(0, "0", base) );
++    VERIFY( check_to_chars<signed int>(0, "0", base) );
++    VERIFY( check_to_chars<unsigned int>(0, "0", base) );
++    VERIFY( check_to_chars<signed long>(0, "0", base) );
++    VERIFY( check_to_chars<unsigned long>(0, "0", base) );
++    VERIFY( check_to_chars<signed long long>(0, "0", base) );
++    VERIFY( check_to_chars<unsigned long long>(0, "0", base) );
++
++    VERIFY( check_to_chars<char>(1, "1", base) );
++    VERIFY( check_to_chars<signed char>(1, "1", base) );
++    VERIFY( check_to_chars<unsigned char>(1, "1", base) );
++    VERIFY( check_to_chars<signed short>(1, "1", base) );
++    VERIFY( check_to_chars<unsigned short>(1, "1", base) );
++    VERIFY( check_to_chars<signed int>(1, "1", base) );
++    VERIFY( check_to_chars<unsigned int>(1, "1", base) );
++    VERIFY( check_to_chars<signed long>(1, "1", base) );
++    VERIFY( check_to_chars<unsigned long>(1, "1", base) );
++    VERIFY( check_to_chars<signed long long>(1, "1", base) );
++    VERIFY( check_to_chars<unsigned long long>(1, "1", base) );
++
++    if constexpr (std::is_signed_v<char>)
++      VERIFY( check_to_chars<char>(-1, "-1", base) );
++    VERIFY( check_to_chars<signed char>(-1, "-1", base) );
++    VERIFY( check_to_chars<signed short>(-1, "-1", base) );
++    VERIFY( check_to_chars<signed int>(-1, "-1", base) );
++    VERIFY( check_to_chars<signed long>(-1, "-1", base) );
++    VERIFY( check_to_chars<signed long long>(-1, "-1", base) );
++
++    if (base > 2)
++    {
++      VERIFY( check_to_chars<char>(2, "2", base) );
++      VERIFY( check_to_chars<signed char>(2, "2", base) );
++      VERIFY( check_to_chars<unsigned char>(2, "2", base) );
++      VERIFY( check_to_chars<signed short>(2, "2", base) );
++      VERIFY( check_to_chars<unsigned short>(2, "2", base) );
++      VERIFY( check_to_chars<signed int>(2, "2", base) );
++      VERIFY( check_to_chars<unsigned int>(2, "2", base) );
++      VERIFY( check_to_chars<signed long>(2, "2", base) );
++      VERIFY( check_to_chars<unsigned long>(2, "2", base) );
++      VERIFY( check_to_chars<signed long long>(2, "2", base) );
++      VERIFY( check_to_chars<unsigned long long>(2, "2", base) );
++
++      if constexpr (std::is_signed_v<char>)
++	VERIFY( check_to_chars<char>(-2, "-2", base) );
++      VERIFY( check_to_chars<signed char>(-2, "-2", base) );
++      VERIFY( check_to_chars<signed short>(-2, "-2", base) );
++      VERIFY( check_to_chars<signed int>(-2, "-2", base) );
++      VERIFY( check_to_chars<signed long>(-2, "-2", base) );
++      VERIFY( check_to_chars<signed long long>(-2, "-2", base) );
++    }
++
++    VERIFY( check_to_chars(2017u, str2017[base]+1, base) );
++    VERIFY( check_to_chars(2017, str2017[base]+1, base) );
++    VERIFY( check_to_chars(-2017, str2017[base], base) );
++    VERIFY( check_to_chars(12345u, str12345[base]+1, base) );
++    VERIFY( check_to_chars(12345, str12345[base]+1, base) );
++    VERIFY( check_to_chars(-12345, str12345[base], base) );
++    VERIFY( check_to_chars(23456u, str23456[base]+1, base) );
++    VERIFY( check_to_chars(23456, str23456[base]+1, base) );
++    VERIFY( check_to_chars(-23456, str23456[base], base) );
++    VERIFY( check_to_chars(INT_MAX + 1ull, strINT_MIN[base]+1, base) );
++    VERIFY( check_to_chars(INT_MAX + 1ll, strINT_MIN[base]+1, base) );
++    VERIFY( check_to_chars(INT_MIN, strINT_MIN[base], base) );
++  }
++
++  VERIFY( check_to_chars(1155, "xx", 34) );
++  VERIFY( check_to_chars(1224, "yy", 35) );
++  VERIFY( check_to_chars(1295, "zz", 36) );
++}
++
++#include <sstream>
++#include <ios>
++
++// base 8
++void
++test04()
++{
++  auto to_string = [](auto val) {
++    std::ostringstream ss;
++    ss << std::oct;
++    if (val < 0)
++      ss << '-' << (~val + 1ull);
++    else if (sizeof(val) == 1)
++      ss << (int)val;
++    else
++      ss << val;
++    return ss.str();
++  };
++
++  VERIFY( check_to_chars<char>(123, to_string(123), 8) );
++  VERIFY( check_to_chars<signed char>(123, to_string(123), 8) );
++  VERIFY( check_to_chars<unsigned char>(123, to_string(123), 8) );
++  VERIFY( check_to_chars<signed short>(123, to_string(123), 8) );
++  VERIFY( check_to_chars<unsigned short>(123, to_string(123), 8) );
++  VERIFY( check_to_chars<signed int>(123, to_string(123), 8) );
++  VERIFY( check_to_chars<unsigned int>(123, to_string(123), 8) );
++  VERIFY( check_to_chars<signed long>(123, to_string(123), 8) );
++  VERIFY( check_to_chars<unsigned long>(123, to_string(123), 8) );
++  VERIFY( check_to_chars<signed long long>(123, to_string(123), 8) );
++  VERIFY( check_to_chars<unsigned long long>(123, to_string(123), 8) );
++
++  if constexpr (std::is_signed_v<char>)
++    VERIFY( check_to_chars<char>(-79, to_string(-79), 8) );
++  VERIFY( check_to_chars<signed char>(-79, to_string(-79), 8) );
++  VERIFY( check_to_chars<signed short>(-79, to_string(-79), 8) );
++  VERIFY( check_to_chars<signed int>(-79, to_string(-79), 8) );
++  VERIFY( check_to_chars<signed long>(-79, to_string(-79), 8) );
++  VERIFY( check_to_chars<signed long long>(-79, to_string(-79), 8) );
++
++  VERIFY( check_to_chars<char>(CHAR_MAX, to_string(CHAR_MAX), 8) );
++  VERIFY( check_to_chars<signed char>(SCHAR_MAX, to_string(SCHAR_MAX), 8) );
++  VERIFY( check_to_chars<unsigned char>(UCHAR_MAX, to_string(UCHAR_MAX), 8) );
++  VERIFY( check_to_chars<signed short>(SHRT_MAX, to_string(SHRT_MAX), 8) );
++  VERIFY( check_to_chars<unsigned short>(USHRT_MAX, to_string(USHRT_MAX), 8) );
++  VERIFY( check_to_chars<signed int>(INT_MAX, to_string(INT_MAX), 8) );
++  VERIFY( check_to_chars<unsigned int>(UINT_MAX, to_string(UINT_MAX), 8) );
++  VERIFY( check_to_chars<signed long>(LONG_MAX, to_string(LONG_MAX), 8) );
++  VERIFY( check_to_chars<unsigned long>(ULONG_MAX, to_string(ULONG_MAX), 8) );
++  VERIFY( check_to_chars<signed long long>(LLONG_MAX, to_string(LLONG_MAX), 8) );
++  VERIFY( check_to_chars<unsigned long long>(ULLONG_MAX, to_string(ULLONG_MAX), 8) );
++
++  VERIFY( check_to_chars<char>(CHAR_MIN, to_string(CHAR_MIN), 8) );
++  VERIFY( check_to_chars<signed char>(SCHAR_MIN, to_string(SCHAR_MIN), 8) );
++  VERIFY( check_to_chars<signed short>(SHRT_MIN, to_string(SHRT_MIN), 8) );
++  VERIFY( check_to_chars<signed int>(INT_MIN, to_string(INT_MIN), 8) );
++  VERIFY( check_to_chars<signed long>(LONG_MIN, to_string(LONG_MIN), 8) );
++  VERIFY( check_to_chars<signed long long>(LLONG_MIN, to_string(LLONG_MIN), 8) );
++
++  VERIFY( check_to_chars<char>(CHAR_MAX/2, to_string(CHAR_MAX/2), 8) );
++  VERIFY( check_to_chars<signed char>(SCHAR_MAX/2, to_string(SCHAR_MAX/2), 8) );
++  VERIFY( check_to_chars<unsigned char>(UCHAR_MAX/2, to_string(UCHAR_MAX/2), 8) );
++  VERIFY( check_to_chars<signed short>(SHRT_MAX/2, to_string(SHRT_MAX/2), 8) );
++  VERIFY( check_to_chars<unsigned short>(USHRT_MAX/2, to_string(USHRT_MAX/2), 8) );
++  VERIFY( check_to_chars<signed int>(INT_MAX/2, to_string(INT_MAX/2), 8) );
++  VERIFY( check_to_chars<unsigned int>(UINT_MAX/2, to_string(UINT_MAX/2), 8) );
++  VERIFY( check_to_chars<signed long>(LONG_MAX/2, to_string(LONG_MAX/2), 8) );
++  VERIFY( check_to_chars<unsigned long>(ULONG_MAX/2, to_string(ULONG_MAX/2), 8) );
++  VERIFY( check_to_chars<signed long long>(LLONG_MAX/2, to_string(LLONG_MAX/2), 8) );
++  VERIFY( check_to_chars<unsigned long long>(ULLONG_MAX/2, to_string(ULLONG_MAX/2), 8) );
++}
++
++// base 16
++void
++test05()
++{
++  auto to_string = [](auto val) {
++    std::ostringstream ss;
++    ss << std::hex;
++    if (val < 0)
++      ss << '-' << (~val + 1ull);
++    else if (sizeof(val) == 1)
++      ss << (int)val;
++    else
++      ss << val;
++    return ss.str();
++  };
++
++  VERIFY( check_to_chars<char>(123, to_string(123), 16) );
++  VERIFY( check_to_chars<signed char>(123, to_string(123), 16) );
++  VERIFY( check_to_chars<unsigned char>(123, to_string(123), 16) );
++  VERIFY( check_to_chars<signed short>(123, to_string(123), 16) );
++  VERIFY( check_to_chars<unsigned short>(123, to_string(123), 16) );
++  VERIFY( check_to_chars<signed int>(123, to_string(123), 16) );
++  VERIFY( check_to_chars<unsigned int>(123, to_string(123), 16) );
++  VERIFY( check_to_chars<signed long>(123, to_string(123), 16) );
++  VERIFY( check_to_chars<unsigned long>(123, to_string(123), 16) );
++  VERIFY( check_to_chars<signed long long>(123, to_string(123), 16) );
++  VERIFY( check_to_chars<unsigned long long>(123, to_string(123), 16) );
++
++  if constexpr (std::is_signed_v<char>)
++    VERIFY( check_to_chars<char>(-79, to_string(-79), 16) );
++  VERIFY( check_to_chars<signed char>(-79, to_string(-79), 16) );
++  VERIFY( check_to_chars<signed short>(-79, to_string(-79), 16) );
++  VERIFY( check_to_chars<signed int>(-79, to_string(-79), 16) );
++  VERIFY( check_to_chars<signed long>(-79, to_string(-79), 16) );
++  VERIFY( check_to_chars<signed long long>(-79, to_string(-79), 16) );
++
++  VERIFY( check_to_chars<char>(CHAR_MAX, to_string(CHAR_MAX), 16) );
++  VERIFY( check_to_chars<signed char>(SCHAR_MAX, to_string(SCHAR_MAX), 16) );
++  VERIFY( check_to_chars<unsigned char>(UCHAR_MAX, to_string(UCHAR_MAX), 16) );
++  VERIFY( check_to_chars<signed short>(SHRT_MAX, to_string(SHRT_MAX), 16) );
++  VERIFY( check_to_chars<unsigned short>(USHRT_MAX, to_string(USHRT_MAX), 16) );
++  VERIFY( check_to_chars<signed int>(INT_MAX, to_string(INT_MAX), 16) );
++  VERIFY( check_to_chars<unsigned int>(UINT_MAX, to_string(UINT_MAX), 16) );
++  VERIFY( check_to_chars<signed long>(LONG_MAX, to_string(LONG_MAX), 16) );
++  VERIFY( check_to_chars<unsigned long>(ULONG_MAX, to_string(ULONG_MAX), 16) );
++  VERIFY( check_to_chars<signed long long>(LLONG_MAX, to_string(LLONG_MAX), 16) );
++  VERIFY( check_to_chars<unsigned long long>(ULLONG_MAX, to_string(ULLONG_MAX), 16) );
++
++  VERIFY( check_to_chars<char>(CHAR_MIN, to_string(CHAR_MIN), 16) );
++  VERIFY( check_to_chars<signed char>(SCHAR_MIN, to_string(SCHAR_MIN), 16) );
++  VERIFY( check_to_chars<signed short>(SHRT_MIN, to_string(SHRT_MIN), 16) );
++  VERIFY( check_to_chars<signed int>(INT_MIN, to_string(INT_MIN), 16) );
++  VERIFY( check_to_chars<signed long>(LONG_MIN, to_string(LONG_MIN), 16) );
++  VERIFY( check_to_chars<signed long long>(LLONG_MIN, to_string(LLONG_MIN), 16) );
++
++  VERIFY( check_to_chars<char>(CHAR_MAX/2, to_string(CHAR_MAX/2), 16) );
++  VERIFY( check_to_chars<signed char>(SCHAR_MAX/2, to_string(SCHAR_MAX/2), 16) );
++  VERIFY( check_to_chars<unsigned char>(UCHAR_MAX/2, to_string(UCHAR_MAX/2), 16) );
++  VERIFY( check_to_chars<signed short>(SHRT_MAX/2, to_string(SHRT_MAX/2), 16) );
++  VERIFY( check_to_chars<unsigned short>(USHRT_MAX/2, to_string(USHRT_MAX/2), 16) );
++  VERIFY( check_to_chars<signed int>(INT_MAX/2, to_string(INT_MAX/2), 16) );
++  VERIFY( check_to_chars<unsigned int>(UINT_MAX/2, to_string(UINT_MAX/2), 16) );
++  VERIFY( check_to_chars<signed long>(LONG_MAX/2, to_string(LONG_MAX/2), 16) );
++  VERIFY( check_to_chars<unsigned long>(ULONG_MAX/2, to_string(ULONG_MAX/2), 16) );
++  VERIFY( check_to_chars<signed long long>(LLONG_MAX/2, to_string(LLONG_MAX/2), 16) );
++  VERIFY( check_to_chars<unsigned long long>(ULLONG_MAX/2, to_string(ULLONG_MAX/2), 16) );
++}
++
++#include <bitset>
++
++// base 2
++void
++test06()
++{
++  auto to_string = [](auto val) {
++    std::string s, sign;
++    if (val < 0)
++    {
++      auto absval = ~val + 1ull;
++      s = std::bitset<sizeof(absval) * CHAR_BIT>(absval).to_string();
++      sign = '-';
++    }
++    else
++      s = std::bitset<sizeof(val) * CHAR_BIT>(val).to_string();
++    auto pos = s.find_first_not_of("0");
++    if (pos == std::string::npos)
++      s.resize(1);
++    else
++      s.erase(0, pos);
++    return sign + s;
++  };
++
++  VERIFY( check_to_chars<char>(123, to_string(123), 2) );
++  VERIFY( check_to_chars<signed char>(123, to_string(123), 2) );
++  VERIFY( check_to_chars<unsigned char>(123, to_string(123), 2) );
++  VERIFY( check_to_chars<signed short>(123, to_string(123), 2) );
++  VERIFY( check_to_chars<unsigned short>(123, to_string(123), 2) );
++  VERIFY( check_to_chars<signed int>(123, to_string(123), 2) );
++  VERIFY( check_to_chars<unsigned int>(123, to_string(123), 2) );
++  VERIFY( check_to_chars<signed long>(123, to_string(123), 2) );
++  VERIFY( check_to_chars<unsigned long>(123, to_string(123), 2) );
++  VERIFY( check_to_chars<signed long long>(123, to_string(123), 2) );
++  VERIFY( check_to_chars<unsigned long long>(123, to_string(123), 2) );
++
++  if constexpr (std::is_signed_v<char>)
++    VERIFY( check_to_chars<char>(-79, to_string(-79), 2) );
++  VERIFY( check_to_chars<signed char>(-79, to_string(-79), 2) );
++  VERIFY( check_to_chars<signed short>(-79, to_string(-79), 2) );
++  VERIFY( check_to_chars<signed int>(-79, to_string(-79), 2) );
++  VERIFY( check_to_chars<signed long>(-79, to_string(-79), 2) );
++  VERIFY( check_to_chars<signed long long>(-79, to_string(-79), 2) );
++
++  VERIFY( check_to_chars<char>(CHAR_MAX, to_string(CHAR_MAX), 2) );
++  VERIFY( check_to_chars<signed char>(SCHAR_MAX, to_string(SCHAR_MAX), 2) );
++  VERIFY( check_to_chars<unsigned char>(UCHAR_MAX, to_string(UCHAR_MAX), 2) );
++  VERIFY( check_to_chars<signed short>(SHRT_MAX, to_string(SHRT_MAX), 2) );
++  VERIFY( check_to_chars<unsigned short>(USHRT_MAX, to_string(USHRT_MAX), 2) );
++  VERIFY( check_to_chars<signed int>(INT_MAX, to_string(INT_MAX), 2) );
++  VERIFY( check_to_chars<unsigned int>(UINT_MAX, to_string(UINT_MAX), 2) );
++  VERIFY( check_to_chars<signed long>(LONG_MAX, to_string(LONG_MAX), 2) );
++  VERIFY( check_to_chars<unsigned long>(ULONG_MAX, to_string(ULONG_MAX), 2) );
++  VERIFY( check_to_chars<signed long long>(LLONG_MAX, to_string(LLONG_MAX), 2) );
++  VERIFY( check_to_chars<unsigned long long>(ULLONG_MAX, to_string(ULLONG_MAX), 2) );
++
++  VERIFY( check_to_chars<char>(CHAR_MIN, to_string(CHAR_MIN), 2) );
++  VERIFY( check_to_chars<signed char>(SCHAR_MIN, to_string(SCHAR_MIN), 2) );
++  VERIFY( check_to_chars<signed short>(SHRT_MIN, to_string(SHRT_MIN), 2) );
++  VERIFY( check_to_chars<signed int>(INT_MIN, to_string(INT_MIN), 2) );
++  VERIFY( check_to_chars<signed long>(LONG_MIN, to_string(LONG_MIN), 2) );
++  VERIFY( check_to_chars<signed long long>(LLONG_MIN, to_string(LLONG_MIN), 2) );
++
++  VERIFY( check_to_chars<char>(CHAR_MAX/2, to_string(CHAR_MAX/2), 2) );
++  VERIFY( check_to_chars<signed char>(SCHAR_MAX/2, to_string(SCHAR_MAX/2), 2) );
++  VERIFY( check_to_chars<unsigned char>(UCHAR_MAX/2, to_string(UCHAR_MAX/2), 2) );
++  VERIFY( check_to_chars<signed short>(SHRT_MAX/2, to_string(SHRT_MAX/2), 2) );
++  VERIFY( check_to_chars<unsigned short>(USHRT_MAX/2, to_string(USHRT_MAX/2), 2) );
++  VERIFY( check_to_chars<signed int>(INT_MAX/2, to_string(INT_MAX/2), 2) );
++  VERIFY( check_to_chars<unsigned int>(UINT_MAX/2, to_string(UINT_MAX/2), 2) );
++  VERIFY( check_to_chars<signed long>(LONG_MAX/2, to_string(LONG_MAX/2), 2) );
++  VERIFY( check_to_chars<unsigned long>(ULONG_MAX/2, to_string(ULONG_MAX/2), 2) );
++  VERIFY( check_to_chars<signed long long>(LLONG_MAX/2, to_string(LLONG_MAX/2), 2) );
++  VERIFY( check_to_chars<unsigned long long>(ULLONG_MAX/2, to_string(ULLONG_MAX/2), 2) );
++}
++
++int
++main()
++{
++  test01();
++  test02();
++  test03();
++  test04();
++  test05();
++  test06();
++}
+diff --git a/libstdc++-v3/testsuite/20_util/to_chars/1_neg.cc b/libstdc++-v3/testsuite/20_util/to_chars/1_neg.cc
+new file mode 100644
+index 0000000..b5cd10b
+--- /dev/null
++++ b/libstdc++-v3/testsuite/20_util/to_chars/1_neg.cc
+@@ -0,0 +1,35 @@
++// Copyright (C) 2017 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// { dg-options "-std=gnu++17" }
++// { dg-do compile { target c++1z } }
++
++#include <utility>
++
++void
++test01(char* first, char* last)
++{
++#if _GLIBCXX_USE_WCHAR_T
++  std::to_chars(first, last, L'\x1'); // { dg-error "no matching" }
++  std::to_chars(first, last, L'\x1', 10); // { dg-error "no matching" }
++#endif
++
++  std::to_chars(first, last, u'\x1'); // { dg-error "no matching" }
++  std::to_chars(first, last, u'\x1', 10); // { dg-error "no matching" }
++  std::to_chars(first, last, U'\x1'); // { dg-error "no matching" }
++  std::to_chars(first, last, U'\x1', 10); // { dg-error "no matching" }
++}
+diff --git a/libstdc++-v3/testsuite/20_util/to_chars/2.cc b/libstdc++-v3/testsuite/20_util/to_chars/2.cc
+new file mode 100644
+index 0000000..066622c
+--- /dev/null
++++ b/libstdc++-v3/testsuite/20_util/to_chars/2.cc
+@@ -0,0 +1,69 @@
++// Copyright (C) 2017 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// { dg-options "-std=gnu++17" }
++// { dg-do run { target c++1z } }
++
++#include <utility>
++#include <testsuite_hooks.h>
++
++// Test std::to_chars error handling.
++
++void
++test01()
++{
++  char buf[9] = "********";
++  std::to_chars_result r;
++
++  r = std::to_chars(buf, buf, 1);
++  VERIFY( r.ec == std::errc::value_too_large );
++  VERIFY( r.ptr == buf );
++  VERIFY( *r.ptr == '*' );
++
++  r = std::to_chars(buf, buf + 3, 0b1000, 2);
++  VERIFY( r.ec == std::errc::value_too_large );
++  VERIFY( r.ptr == buf + 3 );
++  VERIFY( *r.ptr == '*' );
++  r = std::to_chars(buf, buf + 4, 0b1000, 2);
++  VERIFY( !r.ec );
++  VERIFY( r.ptr == buf + 4 );
++  VERIFY( *r.ptr == '*' );
++
++  r = std::to_chars(buf, buf + 4, 10000, 10);
++  VERIFY( r.ec == std::errc::value_too_large );
++  VERIFY( r.ptr == buf + 4 );
++  VERIFY( *r.ptr == '*' );
++  r = std::to_chars(buf, buf + 5, 10000, 10);
++  VERIFY( !r.ec );
++  VERIFY( r.ptr == buf + 5 );
++  VERIFY( *r.ptr == '*' );
++
++  r = std::to_chars(buf, buf + 5, 0x100000, 16);
++  VERIFY( r.ec == std::errc::value_too_large );
++  VERIFY( r.ptr == buf + 5 );
++  VERIFY( *r.ptr == '*' );
++  r = std::to_chars(buf, buf + 6, 0x100000, 16);
++  VERIFY( !r.ec );
++  VERIFY( r.ptr == buf + 6 );
++  VERIFY( *r.ptr == '*' );
++}
++
++int
++main()
++{
++  test01();
++}
+diff --git a/libstdc++-v3/testsuite/20_util/to_chars/requirements.cc b/libstdc++-v3/testsuite/20_util/to_chars/requirements.cc
+new file mode 100644
+index 0000000..632bc81
+--- /dev/null
++++ b/libstdc++-v3/testsuite/20_util/to_chars/requirements.cc
+@@ -0,0 +1,49 @@
++// Copyright (C) 2017 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// { dg-options "-std=gnu++17" }
++// { dg-do compile { target c++1z } }
++
++#include <utility>
++
++namespace std
++{
++  struct to_chars_result;
++
++  char* to_chars_result::*pm2 = &to_chars_result::ptr;
++  error_code to_chars_result::*pm1 = &to_chars_result::ec;
++
++  to_chars_result (*f1)(char*, char*, char, int) = &to_chars;
++  to_chars_result (*f2)(char*, char*, signed char, int) = &to_chars;
++  to_chars_result (*f3)(char*, char*, unsigned char, int) = &to_chars;
++  to_chars_result (*f4)(char*, char*, signed short, int) = &to_chars;
++  to_chars_result (*f5)(char*, char*, unsigned short, int) = &to_chars;
++  to_chars_result (*f6)(char*, char*, signed int, int) = &to_chars;
++  to_chars_result (*f7)(char*, char*, unsigned int, int) = &to_chars;
++  to_chars_result (*f8)(char*, char*, signed long, int) = &to_chars;
++  to_chars_result (*f9)(char*, char*, unsigned long, int) = &to_chars;
++  to_chars_result (*f10)(char*, char*, signed long long, int) = &to_chars;
++  to_chars_result (*f11)(char*, char*, unsigned long long, int) = &to_chars;
++}
++
++void bind()
++{
++  char buf[1];
++  auto [p, e] = std::to_chars(buf, buf + 1, 1, 10);
++  char** pa = std::addressof(p);
++  std::error_code* ea = std::addressof(e);
++}

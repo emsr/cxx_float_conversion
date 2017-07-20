@@ -1,0 +1,308 @@
+namespace std
+{
+
+  /**
+   * 
+   */
+  struct to_chars_result
+  {
+    char* ptr;
+    bool overflow;
+  };
+
+  /**
+   * 
+   */
+  template<>
+    struct tuple_size<to_chars_result>;
+
+  /**
+   * 
+   */
+  template<size_t _Index>
+    struct tuple_element<_Index, to_chars_result>;
+
+
+  /**
+   * 
+   */
+  template<size_t _Index>
+    typename tuple_element<_Index, to_chars_result>::type&
+    get(to_chars_result& __res);
+
+  /**
+   * 
+   */
+  template<size_t _Index>
+    typename tuple_element<_Index, to_chars_result>::type const&
+    get(const to_chars_result& __res);
+
+  /**
+   * 
+   */
+  template<size_t _Index>
+    typename tuple_element<_Index, to_chars_result>::type&&
+    get(to_chars_result&& __res);
+
+  /**
+   * 
+   */
+  template<size_t _Index>
+    typename tuple_element<_Index, to_chars_result>::type const&&
+    get(const to_chars_result&& __res);
+
+
+  /**
+   * 
+   */
+  template<>
+    constexpr char*&
+    get<0>(to_chars_result& __res);
+
+  /**
+   * 
+   */
+  template<>
+    constexpr char* const&
+    get<0>(const to_chars_result& __res);
+
+  /**
+   * 
+   */
+  template<>
+    constexpr char*&&
+    get<0>(to_chars_result&& __res);
+
+  /**
+   * 
+   */
+  template<>
+    constexpr char* const&&
+    get<0>(const to_chars_result&& __res);
+
+
+  /**
+   * 
+   */
+  template<>
+    constexpr bool&
+    get<1>(to_chars_result& __res);
+
+  /**
+   * 
+   */
+  template<>
+    constexpr bool const&
+    get<1>(const to_chars_result& __res);
+
+  /**
+   * 
+   */
+  template<>
+    constexpr bool&&
+    get<1>(to_chars_result&& __res);
+
+  template<>
+    constexpr bool const&&
+    get<1>(const to_chars_result&& __res);
+
+
+  // In the following declarations, T is a signed or unsigned integer type or char.
+  /**
+   * 
+   */
+  to_chars_result
+  to_chars(char* __begin, char* __end, T __value, int __base = 10);
+
+  /**
+   * 
+   */
+  to_chars_result
+  to_chars(char* __begin, char* __end, float __value, bool __hex = false);
+
+  /**
+   * 
+   */
+  to_chars_result
+  to_chars(char* __begin, char* __end, double __value, bool __hex = false);
+
+  /**
+   * 
+   */
+  to_chars_result
+  to_chars(char* __begin, char* __end, long double __value, bool __hex = false);
+
+  
+  /**
+   * 
+   */
+  enum class chars_format
+  {
+    scientific = 0,
+    fixed      = unspecified,
+    hex        = unspecified,
+    general    = fixed | scientific
+  };
+  
+
+  /**
+   * 
+   */
+  to_chars_result
+  to_chars(char* __begin, char* __end, float __value,
+	   chars_format __fmt, int __precision = 6);
+
+  /**
+   * 
+   */
+  to_chars_result
+  to_chars(char* __begin, char* __end, double __value,
+	   chars_format __fmt, int __precision = 6);
+
+  /**
+   * 
+   */
+  to_chars_result
+  to_chars(char* __begin, char* __end, long double __value,
+	   chars_format __fmt, int __precision = 6);
+
+
+  /**
+   * 
+   */
+  struct from_chars_result
+  {
+    const char* ptr;
+    error_code ec;
+  };
+
+  /**
+   * 
+   */
+  template<>
+    struct tuple_size<from_chars_result>;
+
+  /**
+   * 
+   */
+  template<size_t _Index> struct
+    tuple_element<_Index, from_chars_result>;
+
+
+  /**
+   * 
+   */
+  template<size_t _Index>
+    typename tuple_element<_Index, from_chars_result>::type&
+    get(from_chars_result& __res);
+
+  /**
+   * 
+   */
+  template<size_t _Index>
+    typename tuple_element<_Index, from_chars_result>::type const&
+    get(const from_chars_result& __res);
+
+  /**
+   * 
+   */
+  template<size_t _Index>
+    typename tuple_element<_Index, from_chars_result>::type&&
+    get(from_chars_result&& __res);
+
+  /**
+   * 
+   */
+  template<size_t _Index>
+    typename tuple_element<_Index, from_chars_result>::type const&&
+    get(const from_chars_result&& __res);
+
+
+  /**
+   * 
+   */
+  template<>
+    constexpr const char *&
+    get<0>(from_chars_result& __res);
+
+  /**
+   * 
+   */
+  template<>
+    constexpr const char* const&
+    get<0>(const from_chars_result& __res);
+
+  /**
+   * 
+   */
+  template<>
+    constexpr const char*&&
+    get<0>(from_chars_result&& __res);
+
+  /**
+   * 
+   */
+  template<>
+    constexpr const char* const&&
+    get<0>(const from_chars_result&& __res);
+
+
+  /**
+   * 
+   */
+  template<>
+    constexpr error_code&
+    get<1>(from_chars_result& __res);
+
+  /**
+   * 
+   */
+  template<>
+    constexpr error_code const&
+    get<1>(const from_chars_result& __res);
+
+  /**
+   * 
+   */
+  template<>
+    constexpr error_code&&
+    get<1>(from_chars_result&& __res);
+
+  /**
+   * 
+   */
+  template<>
+    constexpr error_code const&&
+    get<1>(const from_chars_result&& __res);
+
+
+  // In the following declarations, T is a signed or unsigned integer type or char.
+  /**
+   * 
+   */
+  from_chars_result
+  from_chars(const char* __begin, const char* __end,
+	     T& __value, int __base = 10);
+
+  /**
+   * 
+   */
+  from_chars_result
+  from_chars(const char* __begin, const char* __end,
+	     float& __value, chars_format __fmt = chars_format::general);
+
+  /**
+   * 
+   */
+  from_chars_result
+  from_chars(const char* __begin, const char* __end,
+	     double& __value, chars_format __fmt = chars_format::general);
+
+  /**
+   * 
+   */
+  from_chars_result
+  from_chars(const char* __begin, const char* __end,
+	     long double& __value,  chars_format __fmt = chars_format::general);
+}
+

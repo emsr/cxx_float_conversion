@@ -1,0 +1,828 @@
+<html><head>
+<meta http-equiv="content-type" content="text/html; charset=windows-1252">
+<title>P0067R4: Elementary string conversions, revision 4</title>
+
+<style type="text/css">
+  ins { text-decoration:none; font-weight:bold; background-color:#A0FFA0 }
+  del { text-decoration:line-through; background-color:#FFA0A0 }  
+  strong { font-weight: inherit; color: #2020ff }
+  table, td, th { border: 1px solid black; border-collapse:collapse; padding: 5px }
+</style>
+</head>
+
+<body>
+ISO/IEC JTC1 SC22 WG21 P0067R4<br>
+Group: Library Working Group<br>
+Jens Maurer &lt;Jens.Maurer@gmx.net&gt;<br>
+2016-07-11<br>
+
+<h1>P0067R4: Elementary string conversions, revision 4</h1>
+
+<h2>Introduction</h2>
+
+Following up on
+<a href="http://open-std.org/JTC1/SC22/WG21/docs/papers/2015/n4412.html">N4412</a>
+"Shortcomings of iostreams", this paper presents
+low-level, locale-independent functions for conversions between
+integers and strings and between floating-point numbers and strings.
+<p>
+Use cases include the increasing number of text-based interchange
+formats such as JSON or XML that do not require internationalization
+support, but do require high throughput when produced by a server.
+</p><p>
+There are a lot of existing functions in C++ to perform such
+conversions, but none offers a high-performance solution.  At a
+minimum, an implementation by an ordinary user of the language using
+an elementary textbook algorithm should not be able to outperform a
+quality standard library implementation.  The requirements are thus:
+
+</p><ul>
+<li>no runtime parsing of format strings
+</li><li>no dynamic memory allcoation inherently required by the interface</li>
+<li>no consideration of locales</li>
+<li>no indirection through function pointers required</li>
+<li>prevention of buffer overruns</li>
+<li>when parsing a string, errors are distinguishable from valid numbers</li>
+<li>when parsing a string, whitespace or decorations are not silently ignored</li>
+</ul>
+
+<p>
+For floating-point numbers, there should be a facility to output a
+floating-point number with a minimum number of decimal digits where
+input from the digits is guaranteed to reproduce the original
+floating-point value.
+</p>
+
+The deliberations in the Kona LEWG sessions resulted in the following comments:
+<ul>
+
+<li>cover all the formatting facilities of printf (choice of base,
+scientific, precision,hexfloat)</li>
+
+<li>spell out round-trip guarantees for the decimal format</li>
+
+<li>explain cost of runtime parameter for base vs. having a separate
+overload with fixed base = 10</li>
+
+<li>use the names to_chars and from_chars</li>
+
+<li>possibly use interface struct { char* ptr; bool overflow; } to_chars(char* ptr, char* last, T value);</li>
+
+<li>use interface struct { const char* ptr; error_code ec; } from_chars(const char* ptr, const char* last, T&amp; value);</li>
+
+<li>check use cases to nail down the to_chars interface</li>
+
+</ul>
+
+
+<h2>Changes</h2>
+
+<h3>Compared to P0067R3 (blue text)</h3>
+
+<ul>
+<li>Wording bug fix: parsing considers chars_format, too</li>
+</ul>
+
+<h3>Compared to P0067R2</h3>
+
+<ul>
+<li>Removed leftover sentence about implementation-defined NaN/inf
+  representation (should be covered by deferring to printf).</li>
+<li>Reflected LWG feedback from Oulu</li>
+<li>Removed incomplete support for std::tie (i.e. tuple_size, tuple_element, get&lt;&gt;)</li>
+</ul>
+
+<h3>Compared to P0067R1</h3>
+<ul>
+<li>for errors, switched to errc constants (thanks to Zhihao Yuan)</li>
+
+<li>Addressed comments from LEWG deliberations in Jacksonville, in
+particular:
+
+<ul>
+
+<li>Specialize tuple_size and tuple_element for to_chars_result and
+from_chars_result</li>
+
+<li>Supply overloads for all signed and unsigned integer types, as
+well as <code>char</code>.</li>
+
+<li>Put the new functions into header &lt;utility&gt;.</li>
+
+<li>Support C11 printf %g for formatting; provide a bitmask type to
+choose formatting / parsing options for floating-point.</li>
+
+<li>Parse both uppercase and lowercase</li>
+
+</ul>
+
+</li>
+
+<li>LEWG decision: Do not support generating uppercase (no change).</li>
+
+<li>LEWG decision: Target for C++17.</li>
+
+</ul>
+
+<h3>Compared to P0067R0</h3>
+<ul>
+<li>Addressed comments from LEWG deliberations in Kona</li>
+<li>Added open issues</li>
+</ul>
+
+<h2>Existing approaches</h2>
+
+<p>
+C++ already provides at least the facilities in the following table,
+each with shortcomings highlighted in the second column.
+</p>
+
+<table align="center">
+<tbody><tr><th>facility</th> <th>shortcomings</th></tr>
+
+<tr><td>sprintf</td>  <td>format string, locale, buffer overrun</td></tr>
+
+<tr><td>snprintf</td> <td>format string, locale</td></tr>
+
+<tr><td>sscanf</td>   <td>format string, locale</td></tr>
+
+<tr><td>atol</td>     <td>locale, does not signal errors</td></tr>
+
+<tr><td>strtol</td>   <td>locale, ignores whitespace and 0x prefix</td></tr>
+
+<tr><td>strstream</td>  <td>locale, ignores whitespace</td></tr>
+
+<tr><td>stringstream</td> <td>locale, ignores whitespace, memory allocation</td></tr>
+
+<tr><td>num_put / num_get facets</td> <td>locale, virtual function</td></tr>
+
+<tr><td>to_string</td>  <td>locale, memory allocation</td></tr>
+
+<tr><td>stoi etc.</td>  <td>locale, memory allocation, ignores whitespace and 0x prefix, exception on error</td></tr>
+
+</tbody></table>
+
+<p>
+As a rough performance comparison, the following simple numeric
+formatting task was implemented: Output the integer numbers 0 ... 1
+million, separated by a single space character, into a contiguous
+array buffer of 10 MB.  This task was executed 10 times.  The
+execution environment was gcc 4.9 on Intel Core i5 M450.
+</p>
+
+<table align="center">
+
+<tbody><tr>
+<td>strstream</td>   <td>864 ms</td>
+<td>uses <code>std::strstream</code> with application-provided buffer</td></tr>
+
+<tr><td>streambuf</td>  <td>540 ms</td>
+<td>uses simple custom streambuf with <code>std::num_put&lt;&gt;</code> facet</td></tr>
+
+<tr><td>direct</td>  <td>285 ms</td> <td>open-coded "divide by 10" algorithm, using the interface described below</td></tr>
+
+<tr><td>fixed-point</td>  <td>125 ms</td>  <td>fixed-point algorithm found in an older AMD optimization guide, using the interface described below</td></tr>
+
+</tbody></table>
+
+<p>
+There are various approaches for even more efficient algorithms;
+see, for example, https://gist.github.com/anonymous/7700052 .
+</p>
+
+
+<h2>Interface discussion</h2>
+
+<p>
+The following discussion assumes that a common interface style should
+be established that covers (built-in) integer and floating-point
+types.  The type <code>T</code> designates such an arithmetic type.
+Note that given these restrictions, output of T to a string has a
+small maximum length in all cases.  The styles for input vs. output
+will differ due to the differing functionality.
+</p>
+
+<p>
+The fundamental interface for a string is that it is caller-allocated,
+contiguous in memory, and not necessarily 0-terminated.  That means,
+it can be represented by a range [<code>first</code>,<code>last</code>)
+where <code>first</code> and <code>last</code> are of type <code>char
+*</code>.
+</p>
+
+<p>
+Given this framework, the following subsections discuss various
+specific interface styles for both output and input. In each case, the
+signature of an integer output or input function is shown.  Criteria
+for comparison include impact on compiler optimizations, indication of
+output buffer overflow, and composability (as a measure of
+ease-of-use).
+</p>
+
+<h3>Output</h3>
+
+<p>
+This subsection discusses various specific interface styles for
+output. In each case, the signature of an integer output function is
+shown.  There is one failure mode for output: overflow of the provided
+output buffer.  Criteria for comparison include impact on compiler
+optimizations, indication of output buffer overflow, and composability
+(as a measure of ease-of-use).  For exposition of the latter,
+consecutive output of two numbers is shown, without any separator.
+</p>
+
+<p>
+Conceptually, an output function has four parameters and two
+results. The parameters are the <code>first</code> and
+<code>last</code> pointers of the buffer, the value, and the desired
+base. The results are the updated <code>first</code> pointer and an
+overflow indication.
+</p>
+
+
+<h4>Feature set of printf / strtol for integers</h4>
+
+<table>
+
+<tbody><tr><td>base 2...36</td><td>overload provided</td></tr>
+<tr><td>uppercase for base &gt; 10</td><td>not supported</td></tr>
+
+</tbody></table>
+
+<h4>Feature set of printf / strtod for floating-point</h4>
+
+<p>
+The following table lists the format specifiers of fprintf relevant to
+floating-point in C11 and the disposition in the context of the
+functionality proposed in this paper.
+</p>
+
+<table>
+<tbody><tr><td></td><td>field width</td><td>not supported</td></tr>
+<tr><td></td><td>precision (number of digits after the decimal-point)</td><td>overload provided</td></tr>
+<tr><td>+</td><td> mandatory sign</td><td>not supported</td></tr>
+<tr><td>space</td><td> prefix</td><td>not supported</td></tr>
+<tr><td>#</td><td> mandatory decimal point</td><td>not supported</td></tr>
+<tr><td>0</td><td> pad with zeroes</td><td>not supported</td></tr>
+<tr><td>L</td><td> long double argument</td><td>overload provided</td></tr>
+<tr><td>f</td><td> fixed-precision lowercase conversion</td><td>overload provided</td></tr>
+<tr><td>F</td><td> fixed-precision uppercase conversion</td><td>not provided</td></tr>
+<tr><td>e</td><td> scientific lowercase conversion</td><td>overload provided</td></tr>
+<tr><td>E</td><td> scientific uppercase conversion</td><td>not provided</td></tr>
+<tr><td>g</td><td> switch between f and e</td><td>overload provided</td></tr>
+<tr><td>G</td><td> switch between F and E</td><td>not provided</td></tr>
+<tr><td>a</td><td> hexadecimal lowercase conversion</td><td>overload provided</td></tr>
+<tr><td>A</td><td> hexadecimal uppercase conversion</td><td>not provided</td></tr>
+</tbody></table>
+
+<h4>Iterator</h4>
+
+<pre>  char * to_chars(char * first, char * last, T value, int base = 10);
+</pre>
+
+<p>
+This interface style returns the updated <code>first</code> pointer.
+That is, the resulting string is in [<code>first</code>,
+<em>return-value</em>) and [<em>return-value</em>, <code>last</code>)
+is unused space in the string.  Such an interface style is used for
+many standard library algorithms, e.g. <code>find</code> [alg.find].
+All parameters are passed by value which helps the optimizer.
+Overflow is indicated by <em>return-value</em> == <code>last</code>.
+The situation that the output exactly fits into the provided buffer
+cannot be distinguished from overflow.  Two consecutive outputs can be
+produced trivially using:
+
+</p><pre>  p = to_chars(p, last, value1);
+  p = to_chars(p, last, value2);
+</pre>
+
+
+
+<h4>Iterator with in-situ update</h4>
+
+<pre>  void to_chars(char *&amp; first, char * last, T value, int base = 10);
+</pre>
+
+<p>
+This interface style updates the <code>first</code> pointer in place.
+That is, the resulting string is in [<code>old-first</code>,
+<code>first</code>) and [<code>first</code>,<code>last</code>) is
+unused space in the string.  Aliasing rules allow that updates to
+<code>first</code> change the data where first points.  To avoid
+redundant updates, the implementation can copy <code>first</code> to a
+local variable.  Overflow is indicated by <code>first</code> reaching
+<code>last</code>.  The situation that the output exactly fits into the
+provided buffer cannot be distinguished from overflow.  Two
+consecutive outputs can be produced trivially using:
+
+</p><pre>  to_chars(p, last, value1);
+  to_chars(p, last, value2);
+</pre>
+
+
+<h4>string_view</h4>
+
+<pre>  void to_chars(std::string_view&amp; s, T value, int base = 10);
+</pre>
+
+This interface style groups the <code>first</code> and
+<code>last</code> pointers into a <code>string_view</code> which is
+updated in-place.  Comments on "iterator with in-situ update" apply
+analogously.
+
+<h4>Iterator with in-situ update and overflow indication</h4>
+
+Adding a boolean return value allows to indicate overflow:
+
+<pre>  bool to_chars(char *&amp; first, char * last, T value, int base = 10);
+</pre>
+
+Comments on "iterator with in-situ update" apply analogously, except
+that the return value indicates whether overflow occurred.
+
+<h4>snprintf</h4>
+
+<pre>  int to_chars(char * first, char * last, T value, int base = 10);
+</pre>
+
+This interface style always returns the number of characters required
+to output T, regardless of whether sufficient space was provided.
+That is, an overflow occurred if the return value is larger than
+<code>last</code>-<code>first</code>, otherwise the resulting string is
+in [<code>first</code>, <code>first + <em>return-value</em></code>).
+Such an interface style is used for <code>snprintf</code>, except that
+the proposed function never 0-terminates the output.  All parameters
+are passed by value which helps the optimizer.  Overflow is indicated
+by a return value strictly larger than the distance between
+<code>first</code> and <code>last</code>.  Computing the amount
+of overflow is helpful to allocate a larger buffer, but, in general,
+requires switching from the fast path, because no further characters
+may be stored.  The elementary functions discussed in this paper all
+have (statically computable) limited maximum output size, so the
+benefit of returning the exact size is small. Two consecutive
+outputs require attention at the caller site to avoid buffer overflow:
+
+<pre>  int n = 0;
+  n += to_chars(first, last, value1);
+  n += to_chars(first + std::min(n, last-first), last, value2);
+</pre>
+
+
+<h4>Kona consensus</h4>
+
+<pre>  struct to_chars_result {
+    char* ptr;
+    bool overflow;
+    operator tuple&lt;char *, bool&gt;() const;
+  };
+  char* get&lt;0&gt;(const to_chars_result&amp;);   // for tie()
+  bool get&lt;1&gt;(const to_chars_result&amp;);
+  to_chars_result to_chars(char* first, char* last, T value, int base = 10);
+</pre>
+
+This interface style returns a named pair with the updated
+<code>first</code> pointer.  All parameters are passed by value which
+helps the optimizer.  Overflow is indicated by a separate overflow
+indicator in the return value.
+
+Two consecutive outputs can be produced easily using:
+
+<pre>  to_chars_result result = to_chars(p, last, value1);
+  result = to_chars(result.ptr, last, value2);
+</pre>
+
+
+<h3>Input</h3>
+
+<p>
+An input function conceptually operates in two steps: First, it
+consumes characters from the input string matching a pattern until the
+first non-matching character or the last of the string is encountered.
+Second, the matched characters are translated into a value of type
+<code>T</code>.  There are two failure modes: no characters match, or
+the pattern translates to a value that is not in the range
+representable by <code>T</code>.
+</p>
+
+<p>
+Conceptually, an input function has three parameters and three
+results. The parameters are the <code>first</code> and
+<code>last</code> pointers of the string and the desired base.  The
+results are the updated <code>first</code> pointer, a
+<code>std::error_code</code> and the parsed value.
+</p>
+
+<p>
+This subsection discusses various specific interface styles for
+input. Failure is indicated by <code>std::error_code</code> with the
+appropriate value.  In each case, the signature of an integer input
+function is shown.  Criteria for comparison include impact on compiler
+optimizations and composability (as a measure of ease-of-use).  For
+exposition of the latter, parsing of two consecutive values is shown,
+without skipping of any separator.
+</p>
+
+<h4>Iterator</h4>
+
+<pre>  const char * from_chars(const char * first, const char * last, T&amp; value, std::error_code&amp; ec, int base = 10);
+</pre>
+
+This interface style returns the updated <code>first</code> pointer.
+That is, the returned pointer points to the first character not
+matching the pattern.  Such an interface style is used for many
+standard library algorithms. Two consecutive inputs can be performed
+like this:
+
+<pre>  T value1, value2;
+  std::error_code ec;
+  p = from_chars(p, last, value1, ec);
+  if (ec)
+    /* parse error */;
+  p = from_chars(p, last, value2, ec);
+  if (ec)
+    /* parse error */;
+</pre>
+
+
+<h4>Iterator with in-situ update</h4>
+
+<pre>  void from_chars(const char *&amp; first, const char * last, T&amp; value, std::error_code&amp; ec, int base = 10);
+</pre>
+
+This interface style updates the <code>first</code> pointer in place.
+Two consecutive inputs can be performed like this:
+<pre>  T value1, value2;
+  std::error_code ec;
+  from_chars(p, last, value1, ec);
+  if (ec)
+    /* parse error */;
+  from_chars(p, last, value2, ec);
+  if (ec)
+    /* parse error */;
+</pre>
+
+
+<h4>Iterator with in-situ update and error return</h4>
+
+<pre>  std::error_code from_chars(const char *&amp; first, const char * last, T&amp; value, int base = 10);
+</pre>
+
+Returning the error code allows for more compact code at the call site:
+
+<pre>  T value1, value2;
+  if (std::error_code ec = from_chars(p, last, value1))
+    /* parse error */;
+  if (std::error_code ec = from_chars(p, last, value2))
+    /* parse error */;
+</pre>
+
+
+<h4>Return a std::pair or std::tuple</h4>
+
+Two of the three results of an input function could be represented by
+a pair.  All three results could be represented by a tuple.  However,
+experience with <code>std::map</code> shows that the naming of the
+parts (<code>first</code> and <code>second</code>) carries no semantic
+meaning which would help reading the resulting code.  If the result
+value moves to the return value, its type <code>T</code> needs to be
+passed explicitly (e.g. as a template parameter).  The composition
+example would be:
+
+<pre>  std::pair&lt;T, std::error_code&gt; res;
+  res = from_chars&lt;T&gt;(p, last);
+  if (res.second)
+    /* parse error */;
+  T value1 = res.first;
+  res = from_chars&lt;T&gt;(p, last);
+  if (res.second)
+    /* parse error */;
+  T value2 = res.second;
+</pre>
+
+
+<h4>Kona consensus</h4>
+
+<pre>  struct from_chars_result {
+    const char* ptr;
+    error_code ec;
+  };
+  const char * get&lt;0&gt;(const from_chars_result&amp;); // for tie()
+  error_code get&lt;1&gt;(const from_chars_result&amp;);
+  from_chars_result from_chars(const char* first, const char* last, T&amp; value, int base = 10);
+</pre>
+
+This interface style returns the updated <code>first</code> pointer
+and an error code.  All parameters, except for the parsed value, are
+passed by value, which helps the optimizer.  Two consecutive inputs
+can be performed like this:
+
+<pre>  T value1, value2;
+  from_chars_result result = from_chars(p, last, value1);
+  if (result.ec)
+    /* parse error */
+  result = from_chars(result.ptr, last, value2);
+  if (result.ec)
+    /* parse error */
+</pre>
+
+<h3>Naming</h3>
+
+<p>
+The LEWG deliberations in Kona expressed the following naming preferences (sorted by number of votes).
+</p>
+
+<table align="center">
+<tbody><tr><td>to_text</td><td>9</td></tr>
+<tr><td>to_chars</td><td>9</td></tr>
+<tr><td>to_digits</td><td>7</td></tr>
+<tr><td>to_characters</td><td>7</td></tr>
+<tr><td>to_printable</td><td>6</td></tr>
+<tr><td>to_ascii</td><td>3</td></tr>
+<tr><td>to_string</td><td>3</td></tr>
+<tr><td>to_output</td><td>1</td></tr>
+<tr><td>[de]serialize</td><td>1</td></tr>
+<tr><td>[un]marshal</td><td>1</td></tr>
+<tr><td>[de]stringify</td><td>1</td></tr>
+</tbody></table>
+
+<p>
+Given the tie in the first place and the author's personal preference
+for <code>to_chars</code>, this paper proposes <code>to_chars</code>
+for the output function and <code>from_chars</code> for the input
+(parse) function.
+</p>
+
+<h3>Cost of runtime parameter for base vs. separate overloads</h3>
+
+The alternatives are
+<pre>  to_chars_result to_chars(char* first, char* last, T value, int base = 10);
+</pre>
+
+vs.
+
+<pre>  to_chars_result to_chars(char* first, char* last, T value);
+  to_chars_result to_chars(char* first, char* last, T value, int base);
+</pre>
+
+The difference is almost a quality-of-implementation issue, except
+that the standard gives appropriate liberty only for member functions,
+not for non-member functions (17.6.5.5 [member.functions]).  The
+former can be implemented like this:
+
+<pre>  inline to_chars_result to_chars(char* first, char* last, T value, int base = 10)
+  {
+    if (base == 10)
+      return to_chars2(first, last, value);
+    else
+      return to_chars2(first, last, value, base);
+  }
+</pre>
+
+<p>
+Other than a slightly increased burden on the inlining and constant
+propagation capabilities of the compiler, the two signatures are thus
+identical in performance. I have analyzed similar cases in the past
+and can confirm that the inline function essentially vanishes for
+optimized compiles.  Personally, I would prefer to give an
+implementation latitude to switch between the two interface styles as
+it sees fit, but that is a question that should be discussed in a
+wider context, independent of the present paper. A similar argument
+applies to the question of overhead for base = 16, where a very
+efficient implementation using SIMD vector instructions is possible.
+</p>
+
+
+<h3>Minor concerns</h3>
+
+<ul>
+
+<li>Why do we not throw an exception on parse error? Two reasons:
+Exceptions come with a cost (in particular, when thrown), and a parse
+error is not an exceptional situation.</li>
+
+</ul>
+
+
+<h2>Wording</h2>
+
+<h3>20.2 Header &lt;utility&gt; synopsis [utility]</h3>
+
+Add the following to 20.2 [utility]:
+
+<pre>namespace std {
+  struct to_chars_result {
+    char* ptr;
+    bool overflow;
+  };
+
+  to_chars_result to_chars(char* first, char* last, <em>see below</em> value, int base = 10);
+
+  to_chars_result to_chars(char* first, char* last, float       value, bool hex = false);
+  to_chars_result to_chars(char* first, char* last, double      value, bool hex = false);
+  to_chars_result to_chars(char* first, char* last, long double value, bool hex = false);
+
+  
+  enum class chars_format {
+    scientific = <em>unspecified</em>,
+    fixed = <em>unspecified</em>,
+    hex = <em>unspecified</em>,
+    general = fixed | scientific
+  };
+
+  to_chars_result to_chars(char* first, char* last, float       value, chars_format fmt, int precision = 6);
+  to_chars_result to_chars(char* first, char* last, double      value, chars_format fmt, int precision = 6);
+  to_chars_result to_chars(char* first, char* last, long double value, chars_format fmt, int precision = 6);
+
+
+  struct from_chars_result {
+    const char* ptr;
+    error_code ec;
+  };
+
+  from_chars_result from_chars(const char* first, const char* last, <em>see below</em>&amp; value, int base = 10);  
+
+  from_chars_result from_chars(const char* first, const char* last, float&amp; value, chars_format fmt = chars_format::general);  
+  from_chars_result from_chars(const char* first, const char* last, double&amp; value, chars_format fmt = chars_format::general);  
+  from_chars_result from_chars(const char* first, const char* last, long double&amp; value,  chars_format fmt = chars_format::general);  
+}
+</pre>
+
+The type chars_format is a bitmask type (17.5.2.1.3 [bitmask.types])
+with elements <code>scientific</code>, <code>fixed</code>,
+  and <code>hex</code>.
+<p>
+For the <code>to_chars</code> function taking a
+parameter <code>base</code>, the implementation shall provide
+overloads for all signed and unsigned integer types
+and <code>char</code> as the type of the parameter <code>value</code>.
+For the <code>from_chars</code> function taking a
+parameter <code>base</code>, the implementation shall provide
+overloads for all signed and unsigned integer types
+and <code>char</code> as the referenced type of the
+parameter <code>value</code>.
+
+</p><h3><strong>20.2.7</strong> Output functions</h3>
+
+<p>
+All functions named <code>to_chars</code> convert <code>value</code>
+into a character string by successively filling the range
+[<code>first</code>, <code>last</code>).  If the member
+<code>overflow</code> of the return value is <code>false</code>, the
+conversion was successful and the member <code>ptr</code> is the
+one-past-the-end pointer of the characters written.  Otherwise, the
+member <code>ptr</code> has the value <code>last</code> and the
+contents of the range [<code>first</code>, <code>last</code>) are
+unspecified.
+</p>
+
+<pre>  to_chars_result to_chars(char* first, char* last, <em>T</em> value, int base = 10);
+</pre>
+
+<em>Requires:</em> <code>base</code> has a value between 2 and 36 (inclusive).
+<p>
+
+<em>Effects:</em> The value of <code>value</code> is converted to a
+string of digits in the given base (with no redundant leading zeroes).
+Digits in the range 10..35 (inclusive) are represented as lowercase
+characters a..z.  If <code>value</code> is less than zero, the
+representation starts with a minus sign.
+</p><p>
+
+<em>Throws:</em> Nothing.
+  
+
+</p><pre>  to_chars_result to_chars(char* first, char* last, float       value, bool hex = false);
+  to_chars_result to_chars(char* first, char* last, double      value, bool hex = false);
+  to_chars_result to_chars(char* first, char* last, long double value, bool hex = false);
+</pre>
+
+<em>Effects:</em> <code>value</code> is converted to a string as-if by
+printf in the "C" locale (see ISO C 7.19.6.1).  If <code>hex</code> is
+true, the conversion specifier is <code>a</code> (without leading
+"0x"); otherwise the conversion specifier is <code>f</code> or
+<code>e</code>. In either case, the representation is such that there
+is at least one digit before the radix point (if present) and the
+representation requires a minimal number of characters, yet parsing
+the representation using the corresponding <code>from_chars</code>
+function recovers <code>value</code> exactly. [ Note:
+This guarantee applies only if <code>to_chars</code>
+and <code>from_chars</code> are executed on the same
+implementation. ]
+<p>
+
+<em>Throws:</em> Nothing.
+
+</p><pre>  to_chars_result to_chars(char* first, char* last, float       value, chars_format fmt, int precision = 6);
+  to_chars_result to_chars(char* first, char* last, double      value, chars_format fmt, int precision = 6);
+  to_chars_result to_chars(char* first, char* last, long double value, chars_format fmt, int precision = 6);
+</pre>
+
+<em>Requires:</em> <code>fmt</code> has the value of one of the
+enumerators of <code>chars_format</code>.<p>
+
+<em>Effects:</em> <code>value</code> is converted to a string as-if by
+<code>printf</code> in the "C" locale with the given precision
+(see ISO C 7.19.6.1).  The conversion specifier is
+<code>f</code> if <code>fmt</code> is
+<code>chars_format::fixed</code>, <code>e</code> if <code>fmt</code>
+is <code>chars_format::scientific</code>, <code>a</code> (without
+leading "0x" in the result) if <code>fmt</code> is
+<code>chars_format::hex</code>, and <code>g</code> if <code>fmt</code>
+is <code>chars_format::general</code>.
+</p><p>
+
+<em>Throws:</em> Nothing.
+
+
+</p><h3><strong>20.2.8</strong> Input functions</h3>
+
+All functions named <code>from_chars</code> analyze the string
+[first,last) for a pattern. If no characters match the pattern,
+<code>value</code> is unmodified, the member <code>ptr</code> of the
+return value is <code>first</code> and the member <code>ec</code> is
+equal to <code>errc::invalid_argument</code>.
+Otherwise, the characters matching the pattern are interpreted as a
+representation of a value of type T.  The member <code>ptr</code> of
+the return value points to the first character not matching the
+pattern, or has the value <code>last</code> if all characters match.
+If the parsed value is not in the range representable by the type of
+<code>value</code>, <code>value</code> is unmodified and the member
+<code>ec</code> of the return value is equal
+to <code>errc::result_out_of_range</code>. Otherwise,
+<code>value</code> is set to the parsed value and the member
+<code>ec</code> is set such that the conversion to <code>bool</code>
+yields false.
+
+<pre>  from_chars_result from_chars(const char* first, const char* last, <em>T</em>&amp; value, int base = 10);  
+</pre>
+
+<em>Requires:</em> <code>base</code> has a value between 2 and 36 (inclusive).
+<p>
+<em>Effects:</em> The pattern is the expected form of the subject
+sequence for the given non-zero base, as described for
+<code>strtol</code> in ISO C 7.20.1.4, except that no "0x" or "0X"
+prefix shall appear if the value of <code>base</code> is 16, and except
+that a minus sign is the only sign that may appear, and only if
+<em>T</em> is a signed type.
+</p><p>
+
+<em>Throws:</em> Nothing.
+
+</p><pre>  from_chars_result from_chars(const char* first, const char* last, float&amp; value, <strong>chars_format fmt</strong>);
+  from_chars_result from_chars(const char* first, const char* last, double&amp; value, <strong>chars_format fmt</strong>);
+  from_chars_result from_chars(const char* first, const char* last, long double&amp; value, <strong>chars_format fmt</strong>);
+</pre>
+
+<em>Effects:</em> The pattern is the expected form of the subject
+sequence <strong>in the "C" locale</strong>, as described for
+<code>strtod</code> in ISO C 7.20.1.3, except that
+
+<ul>
+<li>the only sign that may appear is a minus sign;</li>
+
+<li><strong>if <code>fmt</code> has
+<code>chars_format::scientific</code> set but not
+<code>chars_format::fixed</code>, the otherwise optional exponent part
+shall appear;</strong></li>
+
+<li><strong>if <code>fmt</code> has <code>chars_format::fixed</code>
+set but not <code>chars_format::scientific</code>, the optional
+exponent part shall not appear; and</strong></li>
+
+<li><strong>if <code>fmt</code> is <code>chars_format::hex</code>, the
+prefix "0x" or "0X" shall not appear, but is assumed.</strong></li>
+
+</ul>
+
+In any case, the resulting <code>value</code> is one of at most two
+floating-point values closest to the value of the string matching the
+pattern.
+<p>
+
+<em>Throws:</em> Nothing.
+
+
+
+</p><h2>Open Issues</h2>
+
+(currently none)
+
+
+<h2>References</h2>
+
+<ul>
+<li>"How to print floating-point numbers accurately" by Guy L. Steele
+Jr. and Jon L White, Proceedings of the ACM SIGPLAN'90 Conference on
+Programming Language Design and Implementation;
+<a href="http://www.kurtstephens.com/files/p372-steele.pdf">http://www.kurtstephens.com/files/p372-steele.pdf</a> (starting at page 4 of the PDF)</li>
+
+<li>"Printing Floating-Point Numbers Quickly and Accurately with
+ Integers" by Florian Loitsch, PLDI'10
+<a href="http://www.cs.tufts.edu/%7Enr/cs257/archive/florian-loitsch/printf.pdf">http://www.cs.tufts.edu/~nr/cs257/archive/florian-loitsch/printf.pdf</a></li>
+
+<li>"How to Read Floating Point Numbers Accurately" by William D Clinger,
+University of Oregon
+<a href="http://www.cesura17.net/%7Ewill/professional/research/papers/howtoread.pdf">http://www.cesura17.net/~will/professional/research/papers/howtoread.pdf</a></li>
+
+</ul>
+</body></html>
