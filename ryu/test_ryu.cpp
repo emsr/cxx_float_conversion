@@ -20,21 +20,35 @@ template<typename _Float>
     _Float_thing(_Float __x)
     : _M_sign(std::signbit(__x))
     {
-      _M_mant = _S_bits * std::frexp(__x, &_M_exp);
+      _M_mant = _S_bits * std::abs(std::frexp(__x, &_M_exp));
     }
 
     _Float
     to_Float() const
     {
-      return std::ldexp(_Float(_M_mant), -_S_prec);
+      return (_M_sign ? -1 : +1)
+	   * std::ldexp(_Float(_M_mant), _M_exp - _S_prec);
     }
   };
+
+template<typename _Float>
+  void
+  test_ryu()
+  {
+    std::cout << std::setprecision(std::numeric_limits<_Float>::digits10);
+    const auto w = 6 + std::cout.precision();
+    _Float pi_d = 3.141592654;
+    auto pi = _Float_thing<_Float>(pi_d);
+    std::cout << " pi = " << std::setw(w) << pi_d << '\n';
+    std::cout << " pi = " << pi._M_sign << " " << pi._M_exp << " 0x" << std::hex << pi._M_mant << '\n';
+    std::cout << " pi = " << std::setw(w) << pi.to_Float() << '\n';
+  }
 
 int
 main()
 {
-  auto pi = _Float_thing<double>(3.141592654);
-  std::cout << " pi = " << pi._M_sign << " " << pi._M_exp << " 0x" << std::hex << pi._M_mant << '\n';
-  std::cout << " pi = " << pi.to_Float() << '\n';
+  test_ryu<float>();
+  test_ryu<double>();
+  //test_ryu<long double>();
 }
 

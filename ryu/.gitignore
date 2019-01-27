@@ -1,4 +1,6 @@
 
-
 a.out
+
+test_nexttoward
+test_frexp
 test_ryu
