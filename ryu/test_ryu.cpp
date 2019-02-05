@@ -1,5 +1,6 @@
 #include <cmath>
 #include <limits>
+#include <bit>
 
 #include <iostream>
 #include <iomanip>
@@ -29,6 +30,17 @@ template<typename _Float>
       return (_M_sign ? -1 : +1)
 	   * std::ldexp(_Float(_M_mant), _M_exp - _S_prec);
     }
+
+    void
+    zoom()
+    {
+      _M_exp -= 2; // FIXME: Watch subnorm.
+      _M_mant *= 4;
+    }
+
+    bool
+    is_zoomed()
+    { return std::log2p1(_M_mant) > _S_prec; }
   };
 
 template<typename _Float>
@@ -42,6 +54,10 @@ template<typename _Float>
     std::cout << " pi = " << std::setw(w) << pi_d << '\n';
     std::cout << " pi = " << pi._M_sign << " " << pi._M_exp << " 0x" << std::hex << pi._M_mant << '\n';
     std::cout << " pi = " << std::setw(w) << pi.to_Float() << '\n';
+
+    pi.zoom();
+    std::cout << " pi.is_zoomed() : " << pi.is_zoomed() << '\n';
+    std::cout << " pi = " << pi._M_sign << " " << pi._M_exp << " 0x" << std::hex << pi._M_mant << '\n';
   }
 
 int
